@@ -206,6 +206,10 @@ function computeLayout(caseData) {
   }
   enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, peopleById);
   separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById);
+  resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, peopleById);
+  resolveColumnOverlaps(caseData, positions, generations);
+  enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, peopleById);
+  separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById);
   placeRemainingPeople(caseData, positions);
   normalizePositions(positions);
   const bounds = getBounds(positions);
@@ -268,7 +272,7 @@ function spouseLayoutGap(caseData, relation, linksByGroup, generation) {
   const childGroups = caseData.parentGroups.filter((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden");
   if (childGroups.length === 0) return SPOUSE_GAP;
   const childSpan = childGroups.reduce((sum, group) => sum + estimateSubtreeSpan(caseData, group.childId, linksByGroup) + 28, 0);
-  return Math.max(SPOUSE_GAP, Math.ceil(childSpan / 2) + 72);
+  return Math.max(SPOUSE_GAP, Math.min(SPOUSE_GAP * 1.6, Math.ceil(childSpan / 2) + 72));
 }
 
 function spouseSlotOffset(index) {
@@ -352,7 +356,9 @@ function expandSpouseGapsForParentPairs(caseData, positions, linksByGroup) {
     if (!p1 || !p2 || Math.abs(p1.x - p2.x) >= 10) continue;
     const p1HasParents = childrenWithParentPairs.has(relation.person1Id);
     const p2HasParents = childrenWithParentPairs.has(relation.person2Id);
-    const desiredGap = p1HasParents && p2HasParents ? SPOUSE_GAP * 2 : SPOUSE_GAP;
+    const p1AncestorSpan = parentSideSpan(caseData, positions, linksByGroup, relation.person1Id);
+    const p2AncestorSpan = parentSideSpan(caseData, positions, linksByGroup, relation.person2Id);
+    const desiredGap = p1HasParents && p2HasParents ? Math.max(SPOUSE_GAP * 2, Math.min(SPOUSE_GAP * 3, (p1AncestorSpan + p2AncestorSpan) / 2 + 36)) : SPOUSE_GAP;
     const currentGap = Math.abs(p1.y - p2.y);
     if (Math.abs(currentGap - desiredGap) < 1) continue;
     const direction = p2.y >= p1.y ? 1 : -1;
@@ -387,6 +393,50 @@ function separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup
         pos.y = firstY + belowCount * ROW_GAP;
       }
     }
+  }
+}
+
+function parentSideSpan(caseData, positions, linksByGroup, personId) {
+  const parentGroups = caseData.parentGroups.filter((group) => group.childId === personId && group.diagramVisibility !== "hidden");
+  if (parentGroups.length === 0) return ROW_GAP;
+  let top = Infinity;
+  let bottom = -Infinity;
+  for (const group of parentGroups) {
+    const links = linksByGroup.get(group.parentGroupId) || [];
+    for (const link of links) {
+      const ids = collectVisibleSubtreeIds(caseData, link.parentId, linksByGroup);
+      const bounds = subtreeBounds(positions, ids);
+      if (!bounds) continue;
+      top = Math.min(top, bounds.top);
+      bottom = Math.max(bottom, bounds.bottom);
+    }
+  }
+  return top === Infinity ? ROW_GAP : Math.max(ROW_GAP, bottom - top);
+}
+
+function resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, peopleById) {
+  for (let pass = 0; pass < 3; pass += 1) {
+    let changed = false;
+    for (const cluster of buildParentClusters(caseData, linksByGroup)) {
+      const children = cluster.groups
+        .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+        .sort((a, b) => compareChildGroups(a, b, peopleById));
+      let floor = -Infinity;
+      for (const group of children) {
+        const ids = collectVisibleSubtreeIds(caseData, group.childId, linksByGroup);
+        const bounds = subtreeBounds(positions, ids);
+        if (!bounds) continue;
+        const minTop = floor + Math.max(28, CARD.h * 0.35);
+        if (bounds.top < minTop) {
+          const dy = minTop - bounds.top;
+          shiftPositions(positions, ids, dy);
+          bounds.bottom += dy;
+          changed = true;
+        }
+        floor = Math.max(floor, bounds.bottom);
+      }
+    }
+    if (!changed) break;
   }
 }
 function usedYRangesForGeneration(positions, generations, generation) {
@@ -1321,22 +1371,28 @@ function personFormFields(prefix, legend) {
 function editableRelationItems(caseData, personId) {
   const peopleById = mapBy(caseData.people, "personId");
   const items = [];
-  for (const relation of getSpouseRelations(caseData, personId)) {
-    const other = peopleById.get(otherSpouseId(relation, personId));
-    items.push({ type: "spouse", id: relation.spouseRelationId, value: `spouse:${relation.spouseRelationId}`, label: `配偶者: ${displayName(other)}（${spouseStatusLabel(relation.spouseStatus)}）` });
-  }
+  const addedSpouseRelationIds = new Set();
+  const addSpouseRelationItem = (relation, labelPrefix = "配偶者") => {
+    if (!relation || addedSpouseRelationIds.has(relation.spouseRelationId)) return;
+    const otherId = relation.person1Id === personId ? relation.person2Id : relation.person1Id;
+    const other = peopleById.get(otherId) || peopleById.get(relation.person1Id) || peopleById.get(relation.person2Id);
+    items.push({ type: "spouse", id: relation.spouseRelationId, value: `spouse:${relation.spouseRelationId}`, label: `${labelPrefix}: ${displayName(other)}（${spouseStatusLabel(relation.spouseStatus)}）` });
+    addedSpouseRelationIds.add(relation.spouseRelationId);
+  };
+  for (const relation of getSpouseRelations(caseData, personId)) addSpouseRelationItem(relation);
   for (const group of caseData.parentGroups) {
     const links = caseData.parentLinks.filter((link) => link.parentGroupId === group.parentGroupId);
     if (group.childId === personId) {
       const parents = links.map((link) => displayName(peopleById.get(link.parentId))).join("・");
       items.push({ type: "parentGroup", id: group.parentGroupId, value: `parent:${group.parentGroupId}`, label: `親: ${parents}（${groupKindLabel(group)}）` });
+      addSpouseRelationItem(caseData.spouseRelations.find((relation) => relation.spouseRelationId === group.spouseRelationId), "親の配偶関係");
     } else if (links.some((link) => link.parentId === personId)) {
       items.push({ type: "parentGroup", id: group.parentGroupId, value: `parent:${group.parentGroupId}`, label: `子: ${displayName(peopleById.get(group.childId))}（${groupKindLabel(group)}）` });
+      addSpouseRelationItem(caseData.spouseRelations.find((relation) => relation.spouseRelationId === group.spouseRelationId), "親の配偶関係");
     }
   }
   return items;
 }
-
 function saveRelationEdit(caseData, person, relationItems) {
   const error = document.getElementById("relationEditError");
   const item = relationItems.find((entry) => entry.value === document.getElementById("relationEditTarget").value);
@@ -1577,8 +1633,10 @@ function saveParent(caseData, person) {
     caseData.people.push(makePerson({ personId: parent1Id, ...parent1Values }));
     if (secondParentType === "unknown") {
       parent2Id = nextId(caseData.people.concat(pendingPeople), "personId", "p");
+      spouseRelationId = nextId(caseData.spouseRelations, "spouseRelationId", "s");
       caseData.people.push(makePerson({ personId: parent2Id, familyName: "", givenName: "", gender: "unset", lifeStatus: "unset", relationshipLabel: "親(不明)", heirStatus: "unset", researchStatus: "checking" }));
       caseData.people[caseData.people.length - 1].isUnknownPerson = true;
+      caseData.spouseRelations.push({ spouseRelationId, person1Id: parent1Id, person2Id: parent2Id, spouseStatus: "commonLaw", displayOrder: 1, note: "親追加時に作成した親(不明)との関係" });
     }
   }
 

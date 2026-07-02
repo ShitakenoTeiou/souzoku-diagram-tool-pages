@@ -1,4 +1,4 @@
-﻿const VERSION_LABEL = "ver11";
+const VERSION_LABEL = "ver11";
 const DEFAULT_PRINT_SETTINGS = { paper: "A4", orientation: "landscape", printMode: "normal", fitToOnePage: true };
 const CARD_NORMAL = { w: 184, h: 76 };
 const CARD_SIMPLE = { w: 150, h: 62 };
@@ -87,8 +87,17 @@ function computePrintLayout(data, settings) {
     placeParentsForKnownChildren(data, positions, linksByGroup, generations);
     placeChildrenForKnownParents(data, positions, linksByGroup, generations);
   }
+  for (let i = 0; i < 3; i += 1) {
+    enforceFirstChildMidpointAlignment(data, positions, linksByGroup);
+    separateSiblingChildrenAfterAlignment(data, positions, linksByGroup);
+    resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
+  }
   placeRemainingPeople(data, positions, generations);
   resolveColumnOverlaps(positions, generations, card, data);
+  resolveRootSubtreeOverlaps(data, positions, linksByGroup, generations, card);
+  resolveColumnOverlaps(positions, generations, card, data);
+  enforceFirstChildMidpointAlignment(data, positions, linksByGroup);
+  separateSiblingChildrenAfterAlignment(data, positions, linksByGroup);
   const bounds = diagramBounds(positions, card);
   for (const pos of positions.values()) {
     pos.x += MARGIN - bounds.minX;
@@ -179,6 +188,78 @@ function placeParentsForKnownChildren(data, positions, linksByGroup, generations
   }
 }
 
+
+function parentGroupCenterY(data, positions, group) {
+  const childPos = positions.get(group.childId);
+  if (!childPos) return null;
+  const groups = data.parentGroups
+    .filter((item) => item.childId === group.childId && item.diagramVisibility !== "hidden" && positions.has(item.childId))
+    .sort((a, b) => compareChildConnectionGroup(a, b));
+  const index = Math.max(0, groups.findIndex((item) => item.parentGroupId === group.parentGroupId));
+  return childPos.y + centeredOffset(index, groups.length, GAP_Y + 18);
+}
+
+function firstVisibleGroupForCluster(cluster, positions) {
+  return cluster.groups
+    .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+    .sort((a, b) => compareChildConnectionGroup(a, b))[0] || null;
+}
+
+function enforceFirstChildMidpointAlignment(data, positions, linksByGroup) {
+  const clusters = buildParentClusters(data, linksByGroup)
+    .map((cluster) => {
+      const parents = cluster.parentIds.map((parentId) => ({ parentId, pos: positions.get(parentId) })).filter((item) => item.pos);
+      const firstGroup = firstVisibleGroupForCluster(cluster, positions);
+      const centerY = firstGroup ? parentGroupCenterY(data, positions, firstGroup) : null;
+      return { parents, firstGroup, centerY };
+    })
+    .filter((item) => item.parents.length > 0 && item.centerY !== null)
+    .sort((a, b) => positions.get(b.firstGroup.childId).x - positions.get(a.firstGroup.childId).x);
+  for (const item of clusters) {
+    if (item.parents.length === 1) {
+      item.parents[0].pos.y = item.centerY;
+      continue;
+    }
+    if (item.parents.length !== 2) continue;
+    const orderedParents = item.parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+    orderedParents[0].pos.y = item.centerY - GAP_Y / 2;
+    orderedParents[1].pos.y = item.centerY + GAP_Y / 2;
+  }
+}
+
+function separateSiblingChildrenAfterAlignment(data, positions, linksByGroup) {
+  for (const cluster of buildParentClusters(data, linksByGroup)) {
+    const children = cluster.groups
+      .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+      .sort((a, b) => compareChildConnectionGroup(a, b));
+    if (children.length <= 1) continue;
+    const firstY = positions.get(children[0].childId).y;
+    children.slice(1).forEach((group, index) => {
+      positions.get(group.childId).y = firstY + (index + 1) * GAP_Y;
+    });
+  }
+}
+
+function resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card) {
+  for (const cluster of buildParentClusters(data, linksByGroup)) {
+    const children = cluster.groups
+      .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+      .sort((a, b) => positions.get(a.childId).y - positions.get(b.childId).y || compareChildConnectionGroup(a, b));
+    let floor = -Infinity;
+    for (const group of children) {
+      const ids = collectVisibleSubtreeIds(data, group.childId, linksByGroup);
+      const bounds = subtreeBounds(positions, ids, card);
+      if (!bounds) continue;
+      const minY = floor + Math.max(18, card.h * 0.24);
+      if (bounds.minY < minY) {
+        const dy = minY - bounds.minY;
+        shiftPositions(positions, ids, dy);
+        bounds.maxY += dy;
+      }
+      floor = Math.max(floor, bounds.maxY);
+    }
+  }
+}
 function placeRemainingPeople(data, positions, generations) {
   let y = 0;
   for (const person of data.people) {
@@ -432,23 +513,30 @@ function planParentChildLines(data, layout, linksByGroup) {
       const sourceY = parentAnchor.y + parentSourceOffset(data, layout, child.group, mixedKinds);
       return { ...child, sourceY, connectionY: childConnectionY(data, layout, child.group, child.pos.y) };
     });
-    const minY = Math.min(parentAnchor.y, ...childItems.map((child) => child.sourceY), ...childItems.map((child) => child.connectionY));
-    const maxY = Math.max(parentAnchor.y, ...childItems.map((child) => child.sourceY), ...childItems.map((child) => child.connectionY));
-    let trunkX = Math.min(...childItems.map((child) => child.pos.x - layout.card.w / 2)) - 52;
+    const directChild = childItems.find((child) => parents.length === 1 && child.group.groupKind === "adoptive") || childItems.find((child) => child.group.groupKind !== "adoptive" && Math.abs(child.pos.y - parentAnchor.y) < 1) || childItems.find((child) => child.group.groupKind !== "adoptive" && Math.abs(child.connectionY - parentAnchor.y) < 1);
+    const routedChildren = directChild ? childItems.filter((child) => child !== directChild) : childItems;
+    if (directChild) {
+      const left = directChild.pos.x - layout.card.w / 2;
+      paths.push({ kind: "horizontal", x1: parentAnchor.x, y: directChild.pos.y, x2: left, skipX: null, adoptive: directChild.group.groupKind === "adoptive" });
+    }
+    if (routedChildren.length === 0) continue;
+    const minY = Math.min(parentAnchor.y, ...routedChildren.map((child) => child.sourceY), ...routedChildren.map((child) => child.connectionY));
+    const maxY = Math.max(parentAnchor.y, ...routedChildren.map((child) => child.sourceY), ...routedChildren.map((child) => child.connectionY));
+    let trunkX = Math.min(...routedChildren.map((child) => child.pos.x - layout.card.w / 2)) - 52;
     trunkX = avoidVerticalSegmentOverlap(trunkX, minY, maxY, verticalSegments, 18);
-    const hasBiological = childItems.some((child) => child.group.groupKind !== "adoptive");
-    const hasAdoptive = childItems.some((child) => child.group.groupKind === "adoptive");
+    const hasBiological = routedChildren.some((child) => child.group.groupKind !== "adoptive");
+    const hasAdoptive = routedChildren.some((child) => child.group.groupKind === "adoptive");
     const adoptiveTrunkX = hasBiological && hasAdoptive ? avoidVerticalSegmentOverlap(trunkX - 24, minY, maxY, verticalSegments, 18) : trunkX;
-    for (const child of childItems) child.trunkX = child.group.groupKind === "adoptive" ? adoptiveTrunkX : trunkX;
-    for (const lane of groupBy(childItems, "trunkX").values()) {
+    for (const child of routedChildren) child.trunkX = child.group.groupKind === "adoptive" ? adoptiveTrunkX : trunkX;
+    for (const lane of groupBy(routedChildren, "trunkX").values()) {
       const laneMinY = Math.min(parentAnchor.y, ...lane.map((child) => child.sourceY), ...lane.map((child) => child.connectionY));
       const laneMaxY = Math.max(parentAnchor.y, ...lane.map((child) => child.sourceY), ...lane.map((child) => child.connectionY));
       const allAdoptive = lane.every((child) => child.group.groupKind === "adoptive");
       if (lane.length > 1 || lane.some((child) => child.sourceY !== child.connectionY)) verticalSegments.push({ x: lane[0].trunkX, y1: laneMinY, y2: laneMaxY, allAdoptive });
     }
-    for (const child of childItems) {
+    for (const child of routedChildren) {
       const left = child.pos.x - layout.card.w / 2;
-      if (childItems.length === 1 && child.sourceY === child.connectionY) {
+      if (routedChildren.length === 1 && child.sourceY === child.connectionY) {
         paths.push({ kind: "horizontal", x1: parentAnchor.x, y: child.sourceY, x2: left, skipX: null, adoptive: child.group.groupKind === "adoptive" });
       } else {
         paths.push({ kind: "horizontal", x1: parentAnchor.x, y: child.sourceY, x2: child.trunkX, skipX: child.trunkX, adoptive: child.group.groupKind === "adoptive" });
