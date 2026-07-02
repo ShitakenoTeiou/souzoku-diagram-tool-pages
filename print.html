@@ -1,0 +1,56 @@
+﻿<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>相続関係図ツール ver11 印刷プレビュー</title>
+  <link rel="stylesheet" href="print.css">
+</head>
+<body>
+  <header class="print-toolbar" aria-label="印刷設定">
+    <div class="print-title-block">
+      <div class="print-title">相続関係図ツール ver11</div>
+      <div id="printSubtitle" class="print-subtitle">印刷プレビュー</div>
+    </div>
+    <div class="print-controls">
+      <label>表示
+        <select id="printModeInput">
+          <option value="normal">通常版</option>
+          <option value="simple">簡易版</option>
+        </select>
+      </label>
+      <label>用紙
+        <select id="paperInput">
+          <option value="A4">A4</option>
+          <option value="A3">A3</option>
+        </select>
+      </label>
+      <label>向き
+        <select id="orientationInput">
+          <option value="landscape">横</option>
+          <option value="portrait">縦</option>
+        </select>
+      </label>
+      <label class="check-label"><input id="fitInput" type="checkbox"> 1ページに収める</label>
+      <button id="backButton" type="button">入力画面に戻る</button>
+      <button id="printNowButton" class="primary" type="button">印刷</button>
+    </div>
+  </header>
+  <main class="preview-shell">
+    <div id="emptyMessage" class="empty-message" hidden>印刷するJSONが見つかりません。入力画面から印刷ボタンを押してください。</div>
+    <section id="paperPreview" class="paper-preview paper-a4 landscape" aria-label="印刷プレビュー">
+      <div class="paper-heading">
+        <div id="caseTitle" class="case-title"></div>
+        <div id="caseMeta" class="case-meta"></div>
+      </div>
+      <div class="diagram-frame"><svg id="printSvg" role="img" aria-label="印刷用相続関係図"></svg></div>
+    </section>
+  </main>
+  <style id="pageStyle"></style>
+  <script src="print.js"></script>
+</body>
+</html>
+
+
+
+
