@@ -214,12 +214,13 @@ function computeLayout(caseData) {
   normalizeChildlessSpouseSlots(caseData, positions);
   for (let i = 0; i < 4; i += 1) {
     alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
-    resolveAllCardOverlaps(caseData, positions, linksByGroup);
+    resolveSpouseParentBranchOverlaps(caseData, positions, linksByGroup);
     resolveSpouseLineIntrusions(caseData, positions, linksByGroup);
     resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, peopleById);
   }
   alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
-  resolveAllCardOverlaps(caseData, positions, linksByGroup);
+  resolveSpouseParentBranchOverlaps(caseData, positions, linksByGroup);
+  alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
   placeRemainingPeople(caseData, positions);
   normalizePositions(positions);
   const bounds = getBounds(positions);
@@ -506,6 +507,43 @@ function spouseSlotDirection(caseData, relation, anchorId) {
   return spouseSlotOffset(index) >= 0 ? 1 : -1;
 }
 
+function resolveSpouseParentBranchOverlaps(caseData, positions, linksByGroup) {
+  const decedentId = caseData.caseInfo.decedentPersonId;
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+    for (const relation of caseData.spouseRelations.slice().sort(compareSpouseForLayout)) {
+      const p1 = positions.get(relation.person1Id);
+      const p2 = positions.get(relation.person2Id);
+      if (!p1 || !p2 || Math.abs(p1.x - p2.x) >= 10) continue;
+      const branch1 = parentSideBranchIds(caseData, relation.person1Id, linksByGroup);
+      const branch2 = parentSideBranchIds(caseData, relation.person2Id, linksByGroup);
+      if (branch1.size <= 1 || branch2.size <= 1) continue;
+      const bounds1 = subtreeBounds(positions, branch1);
+      const bounds2 = subtreeBounds(positions, branch2);
+      if (!bounds1 || !bounds2 || !rangesOverlap(bounds1.top - 18, bounds1.bottom + 18, bounds2.top - 18, bounds2.bottom + 18)) continue;
+      const moveSecond = relation.person1Id === decedentId || (relation.person2Id !== decedentId && bounds2.top >= bounds1.top);
+      const movingIds = moveSecond ? branch2 : branch1;
+      const fixedBounds = moveSecond ? bounds1 : bounds2;
+      const movingBounds = moveSecond ? bounds2 : bounds1;
+      const dy = fixedBounds.bottom + ROW_GAP - movingBounds.top;
+      if (dy <= 0) continue;
+      shiftPositions(positions, movingIds, dy);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+}
+
+function parentSideBranchIds(caseData, childId, linksByGroup) {
+  const ids = new Set([childId]);
+  for (const group of caseData.parentGroups) {
+    if (group.childId !== childId || group.diagramVisibility === "hidden") continue;
+    const links = linksByGroup.get(group.parentGroupId) || [];
+    for (const link of links) collectAncestorBranchIds(caseData, link.parentId, linksByGroup, ids);
+  }
+  return ids;
+}
+
 function alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById) {
   for (const cluster of buildParentClusters(caseData, linksByGroup)) {
     const parents = cluster.parentIds.map((parentId) => ({ parentId, pos: positions.get(parentId) })).filter((item) => item.pos);
@@ -525,6 +563,11 @@ function alignDirectFirstChildConnections(caseData, positions, linksByGroup, peo
     }
     if (parents.length !== 2) continue;
     const orderedParents = parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+    const currentGap = orderedParents[1].pos.y - orderedParents[0].pos.y;
+    if (currentGap > SPOUSE_GAP + 1) {
+      childPos.y = (orderedParents[0].pos.y + orderedParents[1].pos.y) / 2;
+      continue;
+    }
     orderedParents[0].pos.y = childPos.y - SPOUSE_GAP / 2;
     orderedParents[1].pos.y = childPos.y + SPOUSE_GAP / 2;
   }
