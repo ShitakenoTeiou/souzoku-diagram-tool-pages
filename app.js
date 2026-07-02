@@ -300,25 +300,45 @@ function placeChildrenForKnownParents(caseData, positions, linksByGroup, peopleB
   }
 }
 
+function parentGroupCenterY(caseData, positions, peopleById, group) {
+  const childPos = positions.get(group.childId);
+  if (!childPos) return null;
+  const groups = caseData.parentGroups
+    .filter((item) => item.childId === group.childId && item.diagramVisibility !== "hidden" && positions.has(item.childId))
+    .sort((a, b) => compareChildConnectionGroup(a, b) || compareChildGroups(a, b, peopleById));
+  const index = Math.max(0, groups.findIndex((item) => item.parentGroupId === group.parentGroupId));
+  return childPos.y + centeredOffset(index, groups.length, SPOUSE_GAP + ROW_GAP);
+}
+
+function firstVisibleGroupForCluster(cluster, positions, peopleById) {
+  return cluster.groups
+    .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+    .sort((a, b) => compareChildGroups(a, b, peopleById))[0] || null;
+}
 function enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, peopleById) {
   const clusters = buildParentClusters(caseData, linksByGroup)
     .map((cluster) => {
       const parents = cluster.parentIds.map((parentId) => ({ parentId, pos: positions.get(parentId) })).filter((item) => item.pos);
-      const children = cluster.groups
-        .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
-        .sort((a, b) => compareChildGroups(a, b, peopleById));
-      return { cluster, parents, children, firstChildPos: children.length > 0 ? positions.get(children[0].childId) : null };
+      const firstGroup = firstVisibleGroupForCluster(cluster, positions, peopleById);
+      const centerY = firstGroup ? parentGroupCenterY(caseData, positions, peopleById, firstGroup) : null;
+      return { cluster, parents, firstGroup, centerY };
     })
-    .filter((item) => item.parents.length === 2 && item.firstChildPos)
-    .sort((a, b) => b.firstChildPos.x - a.firstChildPos.x);
-  const childrenWithParentPairs = new Set(clusters.map((item) => item.children[0].childId));
+    .filter((item) => item.parents.length > 0 && item.centerY !== null)
+    .sort((a, b) => positions.get(b.firstGroup.childId).x - positions.get(a.firstGroup.childId).x);
+  const childrenWithParentPairs = new Set(clusters.filter((item) => item.parents.length === 2).map((item) => item.firstGroup.childId));
   for (const item of clusters) {
+    if (item.parents.length === 1) {
+      item.parents[0].pos.y = item.centerY;
+      continue;
+    }
+    if (item.parents.length !== 2) continue;
     const orderedParents = item.parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
     const parentGap = childrenWithParentPairs.has(orderedParents[0].parentId) && childrenWithParentPairs.has(orderedParents[1].parentId) ? SPOUSE_GAP * 2 : SPOUSE_GAP;
-    orderedParents[0].pos.y = item.firstChildPos.y - parentGap / 2;
-    orderedParents[1].pos.y = item.firstChildPos.y + parentGap / 2;
+    orderedParents[0].pos.y = item.centerY - parentGap / 2;
+    orderedParents[1].pos.y = item.centerY + parentGap / 2;
   }
 }
+
 function expandSpouseGapsForParentPairs(caseData, positions, linksByGroup) {
   const childrenWithParentPairs = new Set();
   for (const cluster of buildParentClusters(caseData, linksByGroup)) {
@@ -605,8 +625,8 @@ function renderSvg(caseData, layout) {
   els.svg.replaceChildren();
   els.svg.setAttribute("width", String(layout.width * state.zoom));
   els.svg.setAttribute("height", String(layout.height * state.zoom));
-  els.svg.setAttribute("viewBox", `0 0 ${layout.width} ${layout.height}`);
-  const root = svgEl("g");
+  els.svg.setAttribute("viewBox", `0 0 ${layout.width * state.zoom} ${layout.height * state.zoom}`);
+  const root = svgEl("g", { transform: `scale(${state.zoom})` });
   const lineLayer = svgEl("g", { class: "line-layer" });
   const cardLayer = svgEl("g", { class: "card-layer" });
   els.svg.appendChild(root);
@@ -671,11 +691,11 @@ function planParentChildLines(caseData, layout, linksByGroup) {
       const sourceY = parentAnchor.y + parentSourceOffset(caseData, layout, linksByGroup, child.group, mixedKinds);
       return { ...child, sourceY, connectionY: childConnectionY(caseData, layout, linksByGroup, child.group, child.pos.y) };
     });
-    const directChild = childItems.find((child) => child.group.groupKind !== "adoptive" && Math.abs(child.pos.y - parentAnchor.y) < 1) || childItems.find((child) => child.group.groupKind !== "adoptive" && Math.abs(child.connectionY - parentAnchor.y) < 1);
+    const directChild = childItems.find((child) => parents.length === 1 && child.group.groupKind === "adoptive") || childItems.find((child) => child.group.groupKind !== "adoptive" && Math.abs(child.pos.y - parentAnchor.y) < 1) || childItems.find((child) => child.group.groupKind !== "adoptive" && Math.abs(child.connectionY - parentAnchor.y) < 1);
     const routedChildren = directChild ? childItems.filter((child) => child !== directChild) : childItems;
     if (directChild) {
       const childLeft = directChild.pos.x - layout.card.w / 2;
-      paths.push({ kind: "horizontal", x1: parentAnchor.x, y: directChild.pos.y, x2: childLeft, skipX: null, adoptive: false });
+      paths.push({ kind: "horizontal", x1: parentAnchor.x, y: directChild.pos.y, x2: childLeft, skipX: null, adoptive: directChild.group.groupKind === "adoptive" });
     }
     if (routedChildren.length > 0) {
       const minY = Math.min(parentAnchor.y, ...routedChildren.map((child) => child.sourceY), ...routedChildren.map((child) => child.connectionY));
