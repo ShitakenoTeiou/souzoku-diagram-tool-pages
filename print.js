@@ -111,6 +111,7 @@ function computePrintLayout(data, settings) {
   resolveSpouseParentBranchOverlaps(data, positions, linksByGroup, card);
   resolveAllCardOverlaps(data, positions, linksByGroup, card);
   alignDirectFirstChildConnections(data, positions, linksByGroup);
+  alignSingleAdoptiveChildrenNearParent(data, positions, linksByGroup, Math.max(18, card.h * 0.9));
   const bounds = diagramBounds(positions, card);
   for (const pos of positions.values()) {
     pos.x += MARGIN - bounds.minX;
@@ -239,6 +240,7 @@ function enforceFirstChildMidpointAlignment(data, positions, linksByGroup) {
     .sort((a, b) => positions.get(b.firstGroup.childId).x - positions.get(a.firstGroup.childId).x);
   for (const item of clusters) {
     if (item.parents.length === 1) {
+      if (item.firstGroup.groupKind === "adoptive") continue;
       item.parents[0].pos.y = item.centerY;
       continue;
     }
@@ -397,19 +399,55 @@ function alignDirectFirstChildConnections(data, positions, linksByGroup) {
     const childPos = positions.get(directGroup.childId);
     if (!childPos) continue;
     if (parents.length === 1) {
+      if (directGroup.groupKind === "adoptive") continue;
       parents[0].pos.y = childPos.y;
       continue;
     }
     if (parents.length !== 2) continue;
+    const targetY = parentGroupCenterY(data, positions, directGroup) ?? childPos.y;
     const orderedParents = parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
     const currentGap = orderedParents[1].pos.y - orderedParents[0].pos.y;
     if (currentGap > GAP_Y + 1) {
       movePersonWithChildlessSpouses(data, positions, directGroup.childId, (orderedParents[0].pos.y + orderedParents[1].pos.y) / 2 - childPos.y);
       continue;
     }
-    orderedParents[0].pos.y = childPos.y - GAP_Y / 2;
-    orderedParents[1].pos.y = childPos.y + GAP_Y / 2;
+    orderedParents[0].pos.y = targetY - GAP_Y / 2;
+    orderedParents[1].pos.y = targetY + GAP_Y / 2;
   }
+}
+
+function alignSingleAdoptiveChildrenNearParent(data, positions, linksByGroup, minDistance) {
+  for (const group of data.parentGroups) {
+    if (group.diagramVisibility === "hidden" || group.groupKind !== "adoptive") continue;
+    const links = linksByGroup.get(group.parentGroupId) || [];
+    if (links.length !== 1) continue;
+    const parent = positions.get(links[0].parentId);
+    const child = positions.get(group.childId);
+    if (!parent || !child) continue;
+    const targetY = chooseOpenYInColumn(positions, group.childId, child.x, parent.y, minDistance);
+    const dy = targetY - child.y;
+    if (Math.abs(dy) < 1) continue;
+    const ids = collectVisibleSubtreeIds(data, group.childId, linksByGroup);
+    ids.delete(links[0].parentId);
+    shiftPositions(positions, ids, dy);
+  }
+}
+
+function chooseOpenYInColumn(positions, movingId, x, preferredY, minDistance) {
+  const steps = [0, 1, -1, 2, -2, 3, -3, 4, -4];
+  for (const step of steps) {
+    const y = preferredY + step * minDistance;
+    let blocked = false;
+    for (const [personId, pos] of positions.entries()) {
+      if (personId === movingId) continue;
+      if (Math.abs(pos.x - x) < 10 && Math.abs(pos.y - y) < minDistance * 0.9) {
+        blocked = true;
+        break;
+      }
+    }
+    if (!blocked) return y;
+  }
+  return preferredY;
 }
 
 function movePersonWithChildlessSpouses(data, positions, personId, dy) {

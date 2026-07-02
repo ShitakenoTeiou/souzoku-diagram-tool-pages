@@ -221,6 +221,7 @@ function computeLayout(caseData) {
   alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
   resolveSpouseParentBranchOverlaps(caseData, positions, linksByGroup);
   alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
+  alignSingleAdoptiveChildrenNearParent(caseData, positions, linksByGroup, ROW_GAP);
   placeRemainingPeople(caseData, positions);
   normalizePositions(positions);
   const bounds = getBounds(positions);
@@ -347,6 +348,7 @@ function enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, p
   const childrenWithParentPairs = new Set(clusters.filter((item) => item.parents.length === 2).map((item) => item.firstGroup.childId));
   for (const item of clusters) {
     if (item.parents.length === 1) {
+      if (item.firstGroup.groupKind === "adoptive") continue;
       item.parents[0].pos.y = item.centerY;
       continue;
     }
@@ -585,19 +587,55 @@ function alignDirectFirstChildConnections(caseData, positions, linksByGroup, peo
     const childPos = positions.get(directGroup.childId);
     if (!childPos) continue;
     if (parents.length === 1) {
+      if (directGroup.groupKind === "adoptive") continue;
       parents[0].pos.y = childPos.y;
       continue;
     }
     if (parents.length !== 2) continue;
+    const targetY = parentGroupCenterY(caseData, positions, peopleById, directGroup) ?? childPos.y;
     const orderedParents = parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
     const currentGap = orderedParents[1].pos.y - orderedParents[0].pos.y;
     if (currentGap > SPOUSE_GAP + 1) {
       movePersonWithChildlessSpouses(caseData, positions, directGroup.childId, (orderedParents[0].pos.y + orderedParents[1].pos.y) / 2 - childPos.y);
       continue;
     }
-    orderedParents[0].pos.y = childPos.y - SPOUSE_GAP / 2;
-    orderedParents[1].pos.y = childPos.y + SPOUSE_GAP / 2;
+    orderedParents[0].pos.y = targetY - SPOUSE_GAP / 2;
+    orderedParents[1].pos.y = targetY + SPOUSE_GAP / 2;
   }
+}
+
+function alignSingleAdoptiveChildrenNearParent(caseData, positions, linksByGroup, minDistance) {
+  for (const group of caseData.parentGroups) {
+    if (group.diagramVisibility === "hidden" || group.groupKind !== "adoptive") continue;
+    const links = linksByGroup.get(group.parentGroupId) || [];
+    if (links.length !== 1) continue;
+    const parent = positions.get(links[0].parentId);
+    const child = positions.get(group.childId);
+    if (!parent || !child) continue;
+    const targetY = chooseOpenYInColumn(positions, group.childId, child.x, parent.y, minDistance);
+    const dy = targetY - child.y;
+    if (Math.abs(dy) < 1) continue;
+    const ids = collectVisibleSubtreeIds(caseData, group.childId, linksByGroup);
+    ids.delete(links[0].parentId);
+    shiftPositions(positions, ids, dy);
+  }
+}
+
+function chooseOpenYInColumn(positions, movingId, x, preferredY, minDistance) {
+  const steps = [0, 1, -1, 2, -2, 3, -3, 4, -4];
+  for (const step of steps) {
+    const y = preferredY + step * minDistance;
+    let blocked = false;
+    for (const [personId, pos] of positions.entries()) {
+      if (personId === movingId) continue;
+      if (Math.abs(pos.x - x) < 10 && Math.abs(pos.y - y) < minDistance * 0.9) {
+        blocked = true;
+        break;
+      }
+    }
+    if (!blocked) return y;
+  }
+  return preferredY;
 }
 
 function movePersonWithChildlessSpouses(caseData, positions, personId, dy) {
