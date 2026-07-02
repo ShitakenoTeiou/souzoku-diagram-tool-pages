@@ -75,7 +75,7 @@ function createInitialCaseFromForm() {
   });
   const now = new Date().toISOString();
   openCase({
-    caseInfo: { caseNo, caseTitle: `${caseNo} ${displayName(decedent)}`, decedentPersonId: decedent.personId, createdAt: now, updatedAt: now, toolVersion: "ver12-prototype", memo: "ver12プロトタイプで作成" },
+    caseInfo: { caseNo, caseTitle: `${caseNo} ${displayName(decedent)}`, decedentPersonId: decedent.personId, createdAt: now, updatedAt: now, toolVersion: "ver13-prototype", memo: "ver13プロトタイプで作成" },
     people: [decedent],
     parentGroups: [],
     parentLinks: [],
@@ -126,7 +126,7 @@ function normalizeCaseData(caseData) {
   caseData.parentLinks = Array.isArray(caseData.parentLinks) ? caseData.parentLinks : [];
   caseData.spouseRelations = Array.isArray(caseData.spouseRelations) ? caseData.spouseRelations : [];
   if (!caseData.caseInfo) caseData.caseInfo = {};
-  caseData.caseInfo.toolVersion ||= "ver12-prototype";
+  caseData.caseInfo.toolVersion ||= "ver13-prototype";
   caseData.caseInfo.updatedAt = new Date().toISOString();
 }
 
@@ -237,9 +237,19 @@ function computeLayout(caseData) {
   compactParentChildDistances(caseData, positions, linksByGroup, peopleById);
   resolveAllCardOverlaps(caseData, positions, linksByGroup);
   clampSpouseRelationGaps(caseData, positions);
+  enforceParentGroupKindOrder(caseData, positions, linksByGroup);
+  compactColumnYSpan(positions, CARD, ROW_GAP * 1.15);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
   placeRemainingPeople(caseData, positions);
+  enforceParentGroupKindOrder(caseData, positions, linksByGroup);
+  compactColumnYSpan(positions, CARD, ROW_GAP * 1.15);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
+  compactColumnYSpan(positions, CARD, ROW_GAP * 1.15);
+  resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
+  packCardRectsNoOverlap(positions, CARD, 18);
+  enforceParentGroupKindOrder(caseData, positions, linksByGroup);
+  packCardRectsNoOverlap(positions, CARD, 18);
+  transformSemanticLayoutToVertical(caseData, positions, generations, CARD);
   normalizePositions(positions);
   const bounds = getBounds(positions);
   return { positions, generations, card: CARD, width: Math.max(1200, bounds.maxX + MARGIN), height: Math.max(760, bounds.maxY + MARGIN) };
@@ -340,11 +350,8 @@ function placeChildrenForKnownParents(caseData, positions, linksByGroup, peopleB
 function parentGroupCenterY(caseData, positions, peopleById, group) {
   const childPos = positions.get(group.childId);
   if (!childPos) return null;
-  const groups = caseData.parentGroups
-    .filter((item) => item.childId === group.childId && item.diagramVisibility !== "hidden" && positions.has(item.childId))
-    .sort((a, b) => compareChildConnectionGroup(a, b) || compareChildGroups(a, b, peopleById));
-  const index = Math.max(0, groups.findIndex((item) => item.parentGroupId === group.parentGroupId));
-  return childPos.y + centeredOffset(index, groups.length, SPOUSE_GAP + ROW_GAP);
+  const groups = orderedParentGroupsForChild(caseData, group.childId);
+  return childPos.y + parentGroupLayoutOffset(groups, group, SPOUSE_GAP + ROW_GAP);
 }
 
 function firstVisibleGroupForCluster(cluster, positions, peopleById) {
@@ -752,13 +759,110 @@ function resolveAllCardOverlaps(caseData, positions, linksByGroup) {
   }
 }
 
+function packCardRectsNoOverlap(positions, card, gap) {
+  const entries = Array.from(positions.entries()).map(([personId, pos]) => ({ personId, pos }));
+  entries.sort((a, b) => a.pos.y - b.pos.y || a.pos.x - b.pos.x || String(a.personId).localeCompare(String(b.personId)));
+  const placed = [];
+  const rectFor = (pos) => ({ left: pos.x - card.w / 2 - gap, right: pos.x + card.w / 2 + gap, top: pos.y - card.h / 2 - gap, bottom: pos.y + card.h / 2 + gap });
+  const xOverlaps = (a, b) => a.left < b.right && a.right > b.left;
+  for (const entry of entries) {
+    for (let guard = 0; guard < entries.length * 4; guard += 1) {
+      const rect = rectFor(entry.pos);
+      const hit = placed.find((item) => xOverlaps(rect, item.rect) && rect.top < item.rect.bottom && rect.bottom > item.rect.top);
+      if (!hit) break;
+      entry.pos.y += hit.rect.bottom - rect.top + gap;
+    }
+    placed.push({ entry, rect: rectFor(entry.pos) });
+  }
+}
+
+
+function compactColumnYSpan(positions, card, maxGap) {
+  const columns = new Map();
+  for (const [personId, pos] of positions.entries()) {
+    const key = Math.round(pos.x / 10) * 10;
+    if (!columns.has(key)) columns.set(key, []);
+    columns.get(key).push({ personId, pos });
+  }
+  const minGap = card.h + 36;
+  for (const column of columns.values()) {
+    column.sort((a, b) => a.pos.y - b.pos.y);
+    let previousY = null;
+    for (const item of column) {
+      if (previousY === null) {
+        previousY = item.pos.y;
+        continue;
+      }
+      const minY = previousY + minGap;
+      const maxY = previousY + maxGap;
+      if (item.pos.y > maxY) item.pos.y = maxY;
+      if (item.pos.y < minY) item.pos.y = minY;
+      previousY = item.pos.y;
+    }
+  }
+  const tops = Array.from(columns.values()).map((column) => Math.min(...column.map((item) => item.pos.y)));
+  if (tops.length === 0) return;
+  const globalTop = Math.min(...tops);
+  for (const column of columns.values()) {
+    const columnTop = Math.min(...column.map((item) => item.pos.y));
+    const dy = globalTop - columnTop;
+    if (Math.abs(dy) < 1) continue;
+    for (const item of column) item.pos.y += dy;
+  }
+}
+
+
+function enforceParentGroupKindOrder(caseData, positions, linksByGroup) {
+  for (let pass = 0; pass < 8; pass += 1) {
+    let changed = false;
+    for (const child of caseData.people) {
+      const groups = orderedParentGroupsForChild(caseData, child.personId).filter((group) => positions.has(group.childId));
+      const biologicalGroups = groups.filter((group) => group.groupKind !== "adoptive");
+      const adoptiveGroups = groups.filter((group) => group.groupKind === "adoptive");
+      if (biologicalGroups.length === 0 || adoptiveGroups.length === 0) continue;
+      const biologicalBottom = Math.max(...biologicalGroups.map((group) => parentGroupCenterY(caseData, positions, linksByGroup, group)));
+      let targetCenter = biologicalBottom + ROW_GAP * 0.74;
+      for (const group of adoptiveGroups.sort((a, b) => parentGroupCenterY(caseData, positions, linksByGroup, a) - parentGroupCenterY(caseData, positions, linksByGroup, b))) {
+        const current = parentGroupCenterY(caseData, positions, linksByGroup, group);
+        const dy = targetCenter - current;
+        if (dy > 1) {
+          shiftPositions(positions, collectParentGroupBranchIds(caseData, positions, linksByGroup, group), dy);
+          changed = true;
+        }
+        targetCenter += ROW_GAP * 0.74;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+function collectParentGroupBranchIds(caseData, positions, linksByGroup, group) {
+  const ids = new Set();
+  for (const link of linksByGroup.get(group.parentGroupId) || []) {
+    collectVisibleSubtreeIds(caseData, link.parentId, linksByGroup, ids);
+    ids.add(link.parentId);
+    for (const relation of getSpouseRelations(caseData, link.parentId)) {
+      const otherId = otherSpouseId(relation, link.parentId);
+      const parent = positions.get(link.parentId);
+      const other = positions.get(otherId);
+      if (parent && other && Math.abs(parent.x - other.x) < 10) {
+        collectVisibleSubtreeIds(caseData, otherId, linksByGroup, ids);
+        ids.add(otherId);
+      }
+    }
+  }
+  ids.delete(group.childId);
+  return ids.size > 0 ? ids : new Set([group.childId]);
+}
+
+
 function resolveFinalCardRectOverlaps(caseData, positions, linksByGroup) {
   for (let pass = 0; pass < 160; pass += 1) {
     const pair = findOverlappingCardPair(positions, CARD, 18, 18);
     if (!pair) return true;
     const lower = chooseLowerOverlapEntry(caseData, pair);
     const upper = lower === pair.a ? pair.b : pair.a;
-    let ids = collectSiblingBlockIds(caseData, lower.personId, positions);
+    let ids = collectFinalOverlapShiftIds(caseData, positions, linksByGroup, lower.personId);
     if (ids.has(upper.personId)) ids = new Set([lower.personId]);
     const bounds = subtreeBounds(positions, ids);
     if (!bounds) continue;
@@ -767,6 +871,20 @@ function resolveFinalCardRectOverlaps(caseData, positions, linksByGroup) {
     shiftPositions(positions, ids, dy);
   }
   return false;
+}
+
+function collectFinalOverlapShiftIds(caseData, positions, linksByGroup, personId) {
+  return collectSiblingBlockIds(caseData, personId, positions);
+}
+
+function directBiologicalParentGroupsForChild(caseData, linksByGroup, childId) {
+  const groups = caseData.parentGroups
+    .filter((group) => group.childId === childId && group.diagramVisibility !== "hidden" && group.groupKind !== "adoptive")
+    .sort(compareChildConnectionGroup);
+  if (groups.length === 0) return [];
+  const first = groups[0];
+  const parentPositions = (linksByGroup.get(first.parentGroupId) || []).map((link) => link.parentId);
+  return parentPositions.length > 0 ? [first] : [];
 }
 
 function findOverlappingCardPair(positions, card, gapX, gapY) {
@@ -1078,6 +1196,57 @@ function placeRemainingPeople(caseData, positions) {
   }
 }
 
+function transformSemanticLayoutToVertical(caseData, positions, generations, card) {
+  const generationGap = Math.max(180, card.h + ROW_GAP);
+  for (const person of caseData.people) {
+    const pos = positions.get(person.personId);
+    if (!pos) continue;
+    const generation = generations.get(person.personId) || 0;
+    pos._layoutOldY = pos.y;
+    pos.x = pos._layoutOldY;
+    pos.y = 420 + generation * generationGap;
+  }
+  alignSpousesOnGenerationRow(caseData, positions, card);
+  packRowsNoOverlap(caseData, positions, generations, card);
+}
+
+function alignSpousesOnGenerationRow(caseData, positions, card) {
+  for (const relation of caseData.spouseRelations) {
+    const p1 = positions.get(relation.person1Id);
+    const p2 = positions.get(relation.person2Id);
+    if (!p1 || !p2) continue;
+    const rowY = Math.min(p1.y, p2.y);
+    p1.y = rowY;
+    p2.y = rowY;
+    const minGap = card.w + 52;
+    if (Math.abs(p1.x - p2.x) < minGap) {
+      const center = average([p1.x, p2.x]);
+      p1.x = center - minGap / 2;
+      p2.x = center + minGap / 2;
+    }
+  }
+}
+
+function packRowsNoOverlap(caseData, positions, generations, card) {
+  const rows = new Map();
+  for (const person of caseData.people) {
+    const pos = positions.get(person.personId);
+    if (!pos) continue;
+    const generation = generations.get(person.personId) || 0;
+    if (!rows.has(generation)) rows.set(generation, []);
+    rows.get(generation).push({ personId: person.personId, pos });
+  }
+  const minGap = card.w + 44;
+  for (const row of rows.values()) {
+    row.sort((a, b) => a.pos.x - b.pos.x || String(a.personId).localeCompare(String(b.personId)));
+    let lastX = null;
+    for (const item of row) {
+      if (lastX !== null && item.pos.x < lastX + minGap) item.pos.x = lastX + minGap;
+      lastX = item.pos.x;
+    }
+  }
+}
+
 function normalizePositions(positions) {
   let minX = Infinity, minY = Infinity;
   for (const pos of positions.values()) { minX = Math.min(minX, pos.x - CARD.w / 2); minY = Math.min(minY, pos.y - CARD.h / 2); }
@@ -1122,23 +1291,37 @@ function drawSpouseLines(caseData, layout, layer) {
 }
 
 function drawParentChildLines(caseData, layout, linksByGroup, layer) {
-  const plan = planParentChildLines(caseData, layout, linksByGroup);
-  const parentSetSegments = plan.parentSetLines.map((line) => parentSetVerticalSegment(line.p1, line.p2, layout.card));
-  const verticalSegments = collectSpouseVerticalSegments(caseData, layout).concat(parentSetSegments, plan.verticalSegments);
-  for (const line of plan.parentSetLines) drawSingleParentSetLine(layer, line.p1, line.p2, layout.card);
-  for (const segment of plan.verticalSegments) {
-    layer.appendChild(svgEl("line", { x1: segment.x, y1: segment.y1, x2: segment.x, y2: segment.y2, stroke: "#374151", "stroke-width": 2, "stroke-linecap": "round", "stroke-dasharray": segment.allAdoptive ? "7 5" : null }));
-  }
-  for (const path of plan.paths) {
-    if (path.kind === "label") {
-      const label = svgEl("text", { x: path.labelX, y: path.labelY, fill: "#475569", "font-size": 11, "font-weight": 700 });
-      label.textContent = path.label;
-      layer.appendChild(label);
-      continue;
+  for (const cluster of buildParentClusters(caseData, linksByGroup)) {
+    const parents = cluster.parentIds.map((id) => layout.positions.get(id)).filter(Boolean);
+    if (parents.length === 0) continue;
+    const visibleGroups = cluster.groups.filter((group) => group.diagramVisibility !== "hidden" && layout.positions.has(group.childId));
+    if (visibleGroups.length === 0) continue;
+    const parentAnchor = verticalParentAnchor(parents, layout.card);
+    const children = visibleGroups.map((group) => ({ group, pos: layout.positions.get(group.childId) })).sort((a, b) => a.pos.x - b.pos.x);
+    const trunkY = parentAnchor.y + Math.max(42, layout.card.h * 0.78);
+    const needsBus = children.length > 1 || children.some((child) => Math.abs(child.pos.x - parentAnchor.x) > 2);
+    if (needsBus) {
+      const minX = Math.min(parentAnchor.x, ...children.map((child) => child.pos.x));
+      const maxX = Math.max(parentAnchor.x, ...children.map((child) => child.pos.x));
+      layer.appendChild(svgEl("line", { x1: parentAnchor.x, y1: parentAnchor.y, x2: parentAnchor.x, y2: trunkY, stroke: "#374151", "stroke-width": 2, "stroke-linecap": "round" }));
+      layer.appendChild(svgEl("line", { x1: minX, y1: trunkY, x2: maxX, y2: trunkY, stroke: "#374151", "stroke-width": 2, "stroke-linecap": "round" }));
     }
-    const d = path.kind === "horizontal" ? horizontalPathWithJumps(path.x1, path.y, path.x2, verticalSegments, path.skipX) : `M ${path.x1} ${path.y1} V ${path.y2}${horizontalContinuationWithJumps(path.x1, path.y2, path.x2, verticalSegments, path.skipX)}`;
-    layer.appendChild(svgEl("path", { d, fill: "none", stroke: "#374151", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", "stroke-dasharray": path.adoptive ? "7 5" : null }));
+    for (const child of children) {
+      const childTop = child.pos.y - layout.card.h / 2;
+      const d = needsBus ? "M " + child.pos.x + " " + trunkY + " V " + childTop : "M " + parentAnchor.x + " " + parentAnchor.y + " V " + childTop;
+      layer.appendChild(svgEl("path", { d, fill: "none", stroke: "#374151", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", "stroke-dasharray": child.group.groupKind === "adoptive" ? "7 5" : null }));
+      if (child.group.adoptionKind) {
+        const label = svgEl("text", { x: child.pos.x + 8, y: Math.max(trunkY, childTop - 8), fill: "#475569", "font-size": 11, "font-weight": 700 });
+        label.textContent = child.group.adoptionKind === "special" ? "????" : "????";
+        layer.appendChild(label);
+      }
+    }
   }
+}
+
+function verticalParentAnchor(parents, card) {
+  if (parents.length === 1) return { x: parents[0].x, y: parents[0].y + card.h / 2 };
+  return { x: average(parents.map((p) => p.x)), y: average(parents.map((p) => p.y)) };
 }
 
 function planParentChildLines(caseData, layout, linksByGroup) {
@@ -1210,11 +1393,8 @@ function collectSpouseVerticalSegments(caseData, layout) {
 }
 
 function childConnectionY(caseData, layout, linksByGroup, group, baseY) {
-  const groups = caseData.parentGroups
-    .filter((item) => item.childId === group.childId && item.diagramVisibility !== "hidden")
-    .sort((a, b) => parentGroupSourceY(caseData, layout, linksByGroup, a) - parentGroupSourceY(caseData, layout, linksByGroup, b) || compareChildConnectionGroup(a, b));
-  const index = Math.max(0, groups.findIndex((item) => item.parentGroupId === group.parentGroupId));
-  return baseY + centeredOffset(index, groups.length, 14);
+  const groups = orderedParentGroupsForChild(caseData, group.childId);
+  return baseY + parentGroupLayoutOffset(groups, group, 14);
 }
 
 function parentGroupSourceY(caseData, layout, linksByGroup, group) {
@@ -1226,9 +1406,8 @@ function parentGroupSourceY(caseData, layout, linksByGroup, group) {
 function parentSourceOffset(caseData, layout, linksByGroup, group, mixedKinds) {
   const sameChildGroups = caseData.parentGroups.filter((item) => item.childId === group.childId && item.diagramVisibility !== "hidden");
   if (sameChildGroups.length <= 1) return 0;
-  const ordered = sameChildGroups.slice().sort((a, b) => parentGroupSourceY(caseData, layout, linksByGroup, a) - parentGroupSourceY(caseData, layout, linksByGroup, b) || compareChildConnectionGroup(a, b));
-  const index = Math.max(0, ordered.findIndex((item) => item.parentGroupId === group.parentGroupId));
-  const sourceOrderOffset = centeredOffset(index, ordered.length, 14);
+  const ordered = orderedParentGroupsForChild(caseData, group.childId);
+  const sourceOrderOffset = parentGroupLayoutOffset(ordered, group, 14);
   if (sourceOrderOffset !== 0) return sourceOrderOffset;
   if (!mixedKinds) return 0;
   return group.groupKind === "adoptive" ? 12 : -12;
@@ -1270,6 +1449,22 @@ function centeredOffset(index, total, gap) {
   return (index - (total - 1) / 2) * gap;
 }
 
+function orderedParentGroupsForChild(caseData, childId) {
+  return caseData.parentGroups
+    .filter((item) => item.childId === childId && item.diagramVisibility !== "hidden")
+    .sort(compareChildConnectionGroup);
+}
+
+function parentGroupLayoutOffset(groups, group, gap) {
+  if (groups.length <= 1) return 0;
+  const hasBiological = groups.some((item) => item.groupKind !== "adoptive");
+  const sameKind = groups.filter((item) => item.groupKind === group.groupKind);
+  const sameKindIndex = Math.max(0, sameKind.findIndex((item) => item.parentGroupId === group.parentGroupId));
+  if (group.groupKind !== "adoptive") return sameKindIndex * gap;
+  const biologicalCount = hasBiological ? groups.filter((item) => item.groupKind !== "adoptive").length : 0;
+  return (biologicalCount + sameKindIndex) * gap;
+}
+
 function compareChildConnectionGroup(a, b) {
   const rank = { biological: 1, adoptive: 2 };
   const rankDiff = (rank[a.groupKind] || 9) - (rank[b.groupKind] || 9);
@@ -1280,21 +1475,30 @@ function compareChildConnectionGroup(a, b) {
 }
 
 function drawSpouseConnector(layer, p1, p2, card, relation = null, positions = null) {
-  if (Math.abs(p1.x - p2.x) >= 10) return;
-  const adjacent = !hasCardBetweenSameColumn(positions, p1, p2, card);
-  if (adjacent) {
-    const x = p1.x;
-    const top = Math.min(p1.y, p2.y) + card.h / 2;
-    const bottom = Math.max(p1.y, p2.y) - card.h / 2;
-    drawVerticalSpouseLine(layer, x, top, bottom, relation);
-    if (relation?.spouseStatus === "divorced") drawDivorceMark(layer, x - 18, (top + bottom) / 2);
+  if (Math.abs(p1.y - p2.y) <= 2) {
+    const y = p1.y;
+    const left = p1.x <= p2.x ? p1 : p2;
+    const right = p1.x <= p2.x ? p2 : p1;
+    const x1 = left.x + card.w / 2;
+    const x2 = right.x - card.w / 2;
+    drawHorizontalSpouseLine(layer, x1, y, x2, relation);
+    if (relation?.spouseStatus === "divorced") drawDivorceMark(layer, (x1 + x2) / 2, y - 18);
     return;
   }
-  const start = spouseSidePoint(p1, p2, card, relation, positions);
-  const end = spouseSidePoint(p2, p1, card, relation, positions);
-  const busX = Math.min(p1.x, p2.x) - card.w / 2 - 28 - Math.abs(start.offset) * 0.8;
-  drawSpousePath(layer, `M ${start.x} ${start.y} H ${busX} V ${end.y} H ${end.x}`, relation);
-  if (relation?.spouseStatus === "divorced") drawDivorceMark(layer, busX - 18, (start.y + end.y) / 2);
+  const startX = p1.x + (p2.x >= p1.x ? card.w / 2 : -card.w / 2);
+  const endX = p2.x + (p2.x >= p1.x ? -card.w / 2 : card.w / 2);
+  const midY = average([p1.y, p2.y]);
+  drawSpousePath(layer, "M " + startX + " " + p1.y + " V " + midY + " H " + endX + " V " + p2.y, relation);
+  if (relation?.spouseStatus === "divorced") drawDivorceMark(layer, (startX + endX) / 2, midY - 18);
+}
+
+function drawHorizontalSpouseLine(layer, x1, y, x2, relation) {
+  if (relation?.spouseStatus === "commonLaw") {
+    layer.appendChild(svgEl("line", { x1, y1: y, x2, y2: y, stroke: "#111827", "stroke-width": 2, "stroke-linecap": "round", "stroke-dasharray": "7 5" }));
+    return;
+  }
+  layer.appendChild(svgEl("line", { x1, y1: y - 4, x2, y2: y - 4, stroke: "#111827", "stroke-width": 2, "stroke-linecap": "round" }));
+  layer.appendChild(svgEl("line", { x1, y1: y + 4, x2, y2: y + 4, stroke: "#111827", "stroke-width": 2, "stroke-linecap": "round" }));
 }
 
 function drawVerticalSpouseLine(layer, x, top, bottom, relation) {
@@ -2321,7 +2525,7 @@ function showLoadingSteps(steps) {
 }
 
 function hideLoadingSteps() { els.loadingOverlay.hidden = true; }
-function touchCase(caseData) { caseData.caseInfo.updatedAt = new Date().toISOString(); caseData.caseInfo.toolVersion = "ver12-prototype"; updateCaseTitle(caseData); }
+function touchCase(caseData) { caseData.caseInfo.updatedAt = new Date().toISOString(); caseData.caseInfo.toolVersion = "ver13-prototype"; updateCaseTitle(caseData); }
 function nextId(items, field, prefix) { let max = 0; for (const item of items) { const value = String(item[field] || ""); if (value.startsWith(prefix)) { const number = Number(value.slice(prefix.length)); if (Number.isFinite(number)) max = Math.max(max, number); } } return `${prefix}${String(max + 1).padStart(3, "0")}`; }
 function nextSpouseDisplayOrder(caseData, personId) { return Math.max(0, ...getSpouseRelations(caseData, personId).map((relation) => Number(relation.displayOrder || 0))) + 1; }
 function nextChildDisplayOrder(caseData, spouseRelationId) { return Math.max(0, ...caseData.parentGroups.filter((group) => group.spouseRelationId === spouseRelationId).map((group) => Number(group.displayOrder || 0))) + 1; }
