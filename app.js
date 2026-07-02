@@ -211,6 +211,7 @@ function computeLayout(caseData) {
   resolveColumnOverlaps(caseData, positions, generations);
   enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, peopleById);
   separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById);
+  normalizeChildlessSpouseSlots(caseData, positions);
   resolveSpouseLineIntrusions(caseData, positions, linksByGroup);
   resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, peopleById);
   placeRemainingPeople(caseData, positions);
@@ -271,11 +272,7 @@ function placeSpouses(caseData, positions, generations, linksByGroup) {
 }
 
 function spouseLayoutGap(caseData, relation, linksByGroup, generation) {
-  if (generation < 0) return SPOUSE_GAP;
-  const childGroups = caseData.parentGroups.filter((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden");
-  if (childGroups.length === 0) return SPOUSE_GAP;
-  const childSpan = childGroups.reduce((sum, group) => sum + estimateSubtreeSpan(caseData, group.childId, linksByGroup) + 28, 0);
-  return Math.max(SPOUSE_GAP, Math.min(SPOUSE_GAP * 1.6, Math.ceil(childSpan / 2) + 72));
+  return SPOUSE_GAP;
 }
 
 function spouseSlotOffset(index) {
@@ -347,33 +344,17 @@ function enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, p
 }
 
 function expandSpouseGapsForParentPairs(caseData, positions, linksByGroup) {
-  const childrenWithParentPairs = new Set();
-  for (const cluster of buildParentClusters(caseData, linksByGroup)) {
-    const parents = cluster.parentIds.map((parentId) => positions.get(parentId)).filter(Boolean);
-    const childId = cluster.groups.find((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))?.childId;
-    if (parents.length === 2 && childId) childrenWithParentPairs.add(childId);
-  }
   for (const relation of caseData.spouseRelations) {
     const p1 = positions.get(relation.person1Id);
     const p2 = positions.get(relation.person2Id);
     if (!p1 || !p2 || Math.abs(p1.x - p2.x) >= 10) continue;
-    const p1HasParents = childrenWithParentPairs.has(relation.person1Id);
-    const p2HasParents = childrenWithParentPairs.has(relation.person2Id);
-    const p1AncestorSpan = parentSideSpan(caseData, positions, linksByGroup, relation.person1Id);
-    const p2AncestorSpan = parentSideSpan(caseData, positions, linksByGroup, relation.person2Id);
-    const desiredGap = p1HasParents && p2HasParents ? Math.max(SPOUSE_GAP * 2, Math.min(SPOUSE_GAP * 3, (p1AncestorSpan + p2AncestorSpan) / 2 + 36)) : SPOUSE_GAP;
+    const desiredGap = SPOUSE_GAP;
     const currentGap = Math.abs(p1.y - p2.y);
     if (Math.abs(currentGap - desiredGap) < 1) continue;
     const direction = p2.y >= p1.y ? 1 : -1;
-    if (p1HasParents && !p2HasParents) {
-      p2.y = p1.y + direction * desiredGap;
-    } else if (!p1HasParents && p2HasParents) {
-      p1.y = p2.y - direction * desiredGap;
-    } else {
-      const centerY = average([p1.y, p2.y]);
-      p1.y = centerY - direction * desiredGap / 2;
-      p2.y = centerY + direction * desiredGap / 2;
-    }
+    const centerY = average([p1.y, p2.y]);
+    p1.y = centerY - direction * desiredGap / 2;
+    p2.y = centerY + direction * desiredGap / 2;
   }
 }
 function separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById) {
@@ -474,6 +455,49 @@ function resolveSpouseLineIntrusions(caseData, positions, linksByGroup) {
     }
     if (!changed) break;
   }
+}
+
+function normalizeChildlessSpouseSlots(caseData, positions) {
+  for (const relation of caseData.spouseRelations.slice().sort(compareSpouseForLayout)) {
+    if (caseData.parentGroups.some((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden")) continue;
+    const anchorId = spouseLayoutAnchorId(caseData, relation);
+    const otherId = otherSpouseId(relation, anchorId);
+    const anchor = positions.get(anchorId);
+    const other = positions.get(otherId);
+    if (!anchor || !other || Math.abs(anchor.x - other.x) >= 10) continue;
+    other.y = chooseOpenSpouseY(positions, anchor, otherId, spouseSlotDirection(caseData, relation, anchorId), SPOUSE_GAP, ROW_GAP);
+  }
+}
+
+
+function chooseOpenSpouseY(positions, anchor, movingId, preferredDirection, gap, minDistance) {
+  const directions = [preferredDirection, -preferredDirection, preferredDirection * 2, -preferredDirection * 2, preferredDirection * 3, -preferredDirection * 3];
+  for (const direction of directions) {
+    const y = anchor.y + direction * gap;
+    let blocked = false;
+    for (const [personId, pos] of positions.entries()) {
+      if (personId === movingId) continue;
+      if (Math.abs(pos.x - anchor.x) < 10 && Math.abs(pos.y - y) < minDistance * 0.9) {
+        blocked = true;
+        break;
+      }
+    }
+    if (!blocked) return y;
+  }
+  return anchor.y + preferredDirection * gap;
+}
+function spouseLayoutAnchorId(caseData, relation) {
+  const decedentId = caseData.caseInfo.decedentPersonId;
+  if (relation.person1Id === decedentId || relation.person2Id === decedentId) return decedentId;
+  const count1 = getSpouseRelations(caseData, relation.person1Id).length;
+  const count2 = getSpouseRelations(caseData, relation.person2Id).length;
+  return count1 >= count2 ? relation.person1Id : relation.person2Id;
+}
+
+function spouseSlotDirection(caseData, relation, anchorId) {
+  const relations = getSpouseRelations(caseData, anchorId).slice().sort(compareSpouseForLayout);
+  const index = Math.max(0, relations.findIndex((item) => item.spouseRelationId === relation.spouseRelationId));
+  return spouseSlotOffset(index) >= 0 ? 1 : -1;
 }
 function usedYRangesForGeneration(positions, generations, generation) {
   const ranges = [];

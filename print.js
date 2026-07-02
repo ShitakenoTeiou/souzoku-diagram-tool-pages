@@ -100,6 +100,7 @@ function computePrintLayout(data, settings) {
   resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
   enforceFirstChildMidpointAlignment(data, positions, linksByGroup);
   separateSiblingChildrenAfterAlignment(data, positions, linksByGroup);
+  normalizeChildlessSpouseSlots(data, positions);
   resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
   resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
   const bounds = diagramBounds(positions, card);
@@ -265,6 +266,49 @@ function resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card) {
   }
 }
 
+
+function normalizeChildlessSpouseSlots(data, positions) {
+  for (const relation of data.spouseRelations.slice().sort(compareSpouseForLayout)) {
+    if (data.parentGroups.some((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden")) continue;
+    const anchorId = spouseLayoutAnchorId(data, relation);
+    const otherId = otherSpouseId(relation, anchorId);
+    const anchor = positions.get(anchorId);
+    const other = positions.get(otherId);
+    if (!anchor || !other || Math.abs(anchor.x - other.x) >= 10) continue;
+    other.y = chooseOpenSpouseY(positions, anchor, otherId, spouseSlotDirection(data, relation, anchorId), GAP_Y, GAP_Y);
+  }
+}
+
+
+function chooseOpenSpouseY(positions, anchor, movingId, preferredDirection, gap, minDistance) {
+  const directions = [preferredDirection, -preferredDirection, preferredDirection * 2, -preferredDirection * 2, preferredDirection * 3, -preferredDirection * 3];
+  for (const direction of directions) {
+    const y = anchor.y + direction * gap;
+    let blocked = false;
+    for (const [personId, pos] of positions.entries()) {
+      if (personId === movingId) continue;
+      if (Math.abs(pos.x - anchor.x) < 10 && Math.abs(pos.y - y) < minDistance * 0.9) {
+        blocked = true;
+        break;
+      }
+    }
+    if (!blocked) return y;
+  }
+  return anchor.y + preferredDirection * gap;
+}
+function spouseLayoutAnchorId(data, relation) {
+  const decedentId = data.caseInfo.decedentPersonId;
+  if (relation.person1Id === decedentId || relation.person2Id === decedentId) return decedentId;
+  const count1 = getSpouseRelations(data, relation.person1Id).length;
+  const count2 = getSpouseRelations(data, relation.person2Id).length;
+  return count1 >= count2 ? relation.person1Id : relation.person2Id;
+}
+
+function spouseSlotDirection(data, relation, anchorId) {
+  const relations = getSpouseRelations(data, anchorId).slice().sort(compareSpouseForLayout);
+  const index = Math.max(0, relations.findIndex((item) => item.spouseRelationId === relation.spouseRelationId));
+  return spouseSlotOffset(index) >= 0 ? 1 : -1;
+}
 function resolveSpouseLineIntrusions(data, positions, linksByGroup, card) {
   for (let pass = 0; pass < 4; pass += 1) {
     let changed = false;
