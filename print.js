@@ -1,4 +1,4 @@
-const VERSION_LABEL = "ver11";
+const VERSION_LABEL = "ver12";
 const DEFAULT_PRINT_SETTINGS = { paper: "A4", orientation: "landscape", printMode: "normal", fitToOnePage: true };
 const CARD_NORMAL = { w: 184, h: 76 };
 const CARD_SIMPLE = { w: 150, h: 62 };
@@ -123,6 +123,7 @@ function computePrintLayout(data, settings) {
   compactParentChildDistances(data, positions, linksByGroup);
   resolveAllCardOverlaps(data, positions, linksByGroup, card);
   clampSpouseRelationGaps(data, positions);
+  resolveFinalCardRectOverlaps(data, positions, linksByGroup, card);
   const bounds = diagramBounds(positions, card);
   for (const pos of positions.values()) {
     pos.x += MARGIN - bounds.minX;
@@ -555,6 +556,56 @@ function resolveAllCardOverlaps(data, positions, linksByGroup, card) {
     }
     if (!changed) break;
   }
+}
+
+function resolveFinalCardRectOverlaps(data, positions, linksByGroup, card) {
+  for (let pass = 0; pass < 160; pass += 1) {
+    const pair = findOverlappingCardPair(positions, card, 12, 12);
+    if (!pair) return true;
+    const lower = chooseLowerOverlapEntry(data, pair);
+    const upper = lower === pair.a ? pair.b : pair.a;
+    let ids = collectSiblingBlockIds(data, lower.personId, positions);
+    if (ids.has(upper.personId)) ids = new Set([lower.personId]);
+    const bounds = subtreeBounds(positions, ids, card);
+    if (!bounds) continue;
+    const minY = upper.rect.bottom + Math.max(16, card.h * 0.2);
+    const dy = Math.max(card.h * 0.5, minY - bounds.minY);
+    shiftPositions(positions, ids, dy);
+  }
+  return false;
+}
+
+function findOverlappingCardPair(positions, card, gapX, gapY) {
+  const entries = Array.from(positions.entries()).map(([personId, pos]) => ({ personId, pos, rect: cardRect(pos, card, gapX, gapY) }));
+  entries.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  for (let i = 0; i < entries.length; i += 1) {
+    for (let j = i + 1; j < entries.length; j += 1) {
+      if (entries[j].rect.top >= entries[i].rect.bottom) break;
+      if (rectsOverlap(entries[i].rect, entries[j].rect)) return { a: entries[i], b: entries[j] };
+    }
+  }
+  return null;
+}
+
+function cardRect(pos, card, gapX, gapY) {
+  return {
+    left: pos.x - card.w / 2 - gapX / 2,
+    right: pos.x + card.w / 2 + gapX / 2,
+    top: pos.y - card.h / 2 - gapY / 2,
+    bottom: pos.y + card.h / 2 + gapY / 2
+  };
+}
+
+function rectsOverlap(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function chooseLowerOverlapEntry(data, pair) {
+  if (Math.abs(pair.a.pos.y - pair.b.pos.y) > 1) return pair.a.pos.y > pair.b.pos.y ? pair.a : pair.b;
+  const decedentId = data.caseInfo.decedentPersonId;
+  if (pair.a.personId === decedentId) return pair.b;
+  if (pair.b.personId === decedentId) return pair.a;
+  return pair.a.pos.x >= pair.b.pos.x ? pair.a : pair.b;
 }
 
 function overlapShiftIds(data, linksByGroup, upperId, lowerId) {

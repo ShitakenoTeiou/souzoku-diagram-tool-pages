@@ -75,7 +75,7 @@ function createInitialCaseFromForm() {
   });
   const now = new Date().toISOString();
   openCase({
-    caseInfo: { caseNo, caseTitle: `${caseNo} ${displayName(decedent)}`, decedentPersonId: decedent.personId, createdAt: now, updatedAt: now, toolVersion: "ver11-prototype", memo: "ver11プロトタイプで作成" },
+    caseInfo: { caseNo, caseTitle: `${caseNo} ${displayName(decedent)}`, decedentPersonId: decedent.personId, createdAt: now, updatedAt: now, toolVersion: "ver12-prototype", memo: "ver12プロトタイプで作成" },
     people: [decedent],
     parentGroups: [],
     parentLinks: [],
@@ -126,7 +126,7 @@ function normalizeCaseData(caseData) {
   caseData.parentLinks = Array.isArray(caseData.parentLinks) ? caseData.parentLinks : [];
   caseData.spouseRelations = Array.isArray(caseData.spouseRelations) ? caseData.spouseRelations : [];
   if (!caseData.caseInfo) caseData.caseInfo = {};
-  caseData.caseInfo.toolVersion ||= "ver11-prototype";
+  caseData.caseInfo.toolVersion ||= "ver12-prototype";
   caseData.caseInfo.updatedAt = new Date().toISOString();
 }
 
@@ -237,7 +237,9 @@ function computeLayout(caseData) {
   compactParentChildDistances(caseData, positions, linksByGroup, peopleById);
   resolveAllCardOverlaps(caseData, positions, linksByGroup);
   clampSpouseRelationGaps(caseData, positions);
+  resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
   placeRemainingPeople(caseData, positions);
+  resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
   normalizePositions(positions);
   const bounds = getBounds(positions);
   return { positions, generations, card: CARD, width: Math.max(1200, bounds.maxX + MARGIN), height: Math.max(760, bounds.maxY + MARGIN) };
@@ -748,6 +750,56 @@ function resolveAllCardOverlaps(caseData, positions, linksByGroup) {
     }
     if (!changed) break;
   }
+}
+
+function resolveFinalCardRectOverlaps(caseData, positions, linksByGroup) {
+  for (let pass = 0; pass < 160; pass += 1) {
+    const pair = findOverlappingCardPair(positions, CARD, 18, 18);
+    if (!pair) return true;
+    const lower = chooseLowerOverlapEntry(caseData, pair);
+    const upper = lower === pair.a ? pair.b : pair.a;
+    let ids = collectSiblingBlockIds(caseData, lower.personId, positions);
+    if (ids.has(upper.personId)) ids = new Set([lower.personId]);
+    const bounds = subtreeBounds(positions, ids);
+    if (!bounds) continue;
+    const minTop = upper.rect.bottom + 28;
+    const dy = Math.max(ROW_GAP * 0.5, minTop - bounds.top);
+    shiftPositions(positions, ids, dy);
+  }
+  return false;
+}
+
+function findOverlappingCardPair(positions, card, gapX, gapY) {
+  const entries = Array.from(positions.entries()).map(([personId, pos]) => ({ personId, pos, rect: cardRect(pos, card, gapX, gapY) }));
+  entries.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+  for (let i = 0; i < entries.length; i += 1) {
+    for (let j = i + 1; j < entries.length; j += 1) {
+      if (entries[j].rect.top >= entries[i].rect.bottom) break;
+      if (rectsOverlap(entries[i].rect, entries[j].rect)) return { a: entries[i], b: entries[j] };
+    }
+  }
+  return null;
+}
+
+function cardRect(pos, card, gapX, gapY) {
+  return {
+    left: pos.x - card.w / 2 - gapX / 2,
+    right: pos.x + card.w / 2 + gapX / 2,
+    top: pos.y - card.h / 2 - gapY / 2,
+    bottom: pos.y + card.h / 2 + gapY / 2
+  };
+}
+
+function rectsOverlap(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function chooseLowerOverlapEntry(caseData, pair) {
+  if (Math.abs(pair.a.pos.y - pair.b.pos.y) > 1) return pair.a.pos.y > pair.b.pos.y ? pair.a : pair.b;
+  const decedentId = caseData.caseInfo.decedentPersonId;
+  if (pair.a.personId === decedentId) return pair.b;
+  if (pair.b.personId === decedentId) return pair.a;
+  return pair.a.pos.x >= pair.b.pos.x ? pair.a : pair.b;
 }
 
 function overlapShiftIds(caseData, linksByGroup, upperId, lowerId) {
@@ -2269,7 +2321,7 @@ function showLoadingSteps(steps) {
 }
 
 function hideLoadingSteps() { els.loadingOverlay.hidden = true; }
-function touchCase(caseData) { caseData.caseInfo.updatedAt = new Date().toISOString(); caseData.caseInfo.toolVersion = "ver11-prototype"; updateCaseTitle(caseData); }
+function touchCase(caseData) { caseData.caseInfo.updatedAt = new Date().toISOString(); caseData.caseInfo.toolVersion = "ver12-prototype"; updateCaseTitle(caseData); }
 function nextId(items, field, prefix) { let max = 0; for (const item of items) { const value = String(item[field] || ""); if (value.startsWith(prefix)) { const number = Number(value.slice(prefix.length)); if (Number.isFinite(number)) max = Math.max(max, number); } } return `${prefix}${String(max + 1).padStart(3, "0")}`; }
 function nextSpouseDisplayOrder(caseData, personId) { return Math.max(0, ...getSpouseRelations(caseData, personId).map((relation) => Number(relation.displayOrder || 0))) + 1; }
 function nextChildDisplayOrder(caseData, spouseRelationId) { return Math.max(0, ...caseData.parentGroups.filter((group) => group.spouseRelationId === spouseRelationId).map((group) => Number(group.displayOrder || 0))) + 1; }
