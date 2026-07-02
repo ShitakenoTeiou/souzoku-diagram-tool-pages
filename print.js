@@ -91,13 +91,17 @@ function computePrintLayout(data, settings) {
     enforceFirstChildMidpointAlignment(data, positions, linksByGroup);
     separateSiblingChildrenAfterAlignment(data, positions, linksByGroup);
     resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
+    resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
   }
   placeRemainingPeople(data, positions, generations);
   resolveColumnOverlaps(positions, generations, card, data);
   resolveRootSubtreeOverlaps(data, positions, linksByGroup, generations, card);
   resolveColumnOverlaps(positions, generations, card, data);
+  resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
   enforceFirstChildMidpointAlignment(data, positions, linksByGroup);
   separateSiblingChildrenAfterAlignment(data, positions, linksByGroup);
+  resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
+  resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
   const bounds = diagramBounds(positions, card);
   for (const pos of positions.values()) {
     pos.x += MARGIN - bounds.minX;
@@ -258,6 +262,39 @@ function resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card) {
       }
       floor = Math.max(floor, bounds.maxY);
     }
+  }
+}
+
+function resolveSpouseLineIntrusions(data, positions, linksByGroup, card) {
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+    for (const relation of data.spouseRelations.slice().sort(compareSpouseForLayout)) {
+      const p1 = positions.get(relation.person1Id);
+      const p2 = positions.get(relation.person2Id);
+      if (!p1 || !p2 || Math.abs(p1.x - p2.x) >= 10) continue;
+      const topY = Math.min(p1.y, p2.y);
+      const bottomY = Math.max(p1.y, p2.y);
+      const lowerLimit = bottomY + card.h / 2 + Math.max(18, card.h * 0.35);
+      const intruders = [];
+      for (const [personId, pos] of positions.entries()) {
+        if (personId === relation.person1Id || personId === relation.person2Id) continue;
+        if (Math.abs(pos.x - p1.x) >= 10) continue;
+        if (pos.y > topY + card.h / 2 && pos.y < bottomY - card.h / 2) intruders.push({ personId, pos });
+      }
+      intruders.sort((a, b) => a.pos.y - b.pos.y);
+      for (const intruder of intruders) {
+        const ids = collectVisibleSubtreeIds(data, intruder.personId, linksByGroup);
+        ids.delete(relation.person1Id);
+        ids.delete(relation.person2Id);
+        const bounds = subtreeBounds(positions, ids, card);
+        if (!bounds) continue;
+        const dy = lowerLimit - bounds.minY;
+        if (dy <= 0) continue;
+        shiftPositions(positions, ids, dy);
+        changed = true;
+      }
+    }
+    if (!changed) break;
   }
 }
 function placeRemainingPeople(data, positions, generations) {

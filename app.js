@@ -207,9 +207,12 @@ function computeLayout(caseData) {
   enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, peopleById);
   separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById);
   resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, peopleById);
+  resolveSpouseLineIntrusions(caseData, positions, linksByGroup);
   resolveColumnOverlaps(caseData, positions, generations);
   enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, peopleById);
   separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById);
+  resolveSpouseLineIntrusions(caseData, positions, linksByGroup);
+  resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, peopleById);
   placeRemainingPeople(caseData, positions);
   normalizePositions(positions);
   const bounds = getBounds(positions);
@@ -434,6 +437,39 @@ function resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, people
           changed = true;
         }
         floor = Math.max(floor, bounds.bottom);
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+function resolveSpouseLineIntrusions(caseData, positions, linksByGroup) {
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+    for (const relation of caseData.spouseRelations.slice().sort(compareSpouseForLayout)) {
+      const p1 = positions.get(relation.person1Id);
+      const p2 = positions.get(relation.person2Id);
+      if (!p1 || !p2 || Math.abs(p1.x - p2.x) >= 10) continue;
+      const topY = Math.min(p1.y, p2.y);
+      const bottomY = Math.max(p1.y, p2.y);
+      const lowerLimit = bottomY + CARD.h / 2 + Math.max(28, ROW_GAP * 0.35);
+      const intruders = [];
+      for (const [personId, pos] of positions.entries()) {
+        if (personId === relation.person1Id || personId === relation.person2Id) continue;
+        if (Math.abs(pos.x - p1.x) >= 10) continue;
+        if (pos.y > topY + CARD.h / 2 && pos.y < bottomY - CARD.h / 2) intruders.push({ personId, pos });
+      }
+      intruders.sort((a, b) => a.pos.y - b.pos.y);
+      for (const intruder of intruders) {
+        const ids = collectVisibleSubtreeIds(caseData, intruder.personId, linksByGroup);
+        ids.delete(relation.person1Id);
+        ids.delete(relation.person2Id);
+        const bounds = subtreeBounds(positions, ids);
+        if (!bounds) continue;
+        const dy = lowerLimit - bounds.top;
+        if (dy <= 0) continue;
+        shiftPositions(positions, ids, dy);
+        changed = true;
       }
     }
     if (!changed) break;
