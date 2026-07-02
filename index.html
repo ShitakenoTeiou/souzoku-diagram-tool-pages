@@ -1,0 +1,96 @@
+﻿<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>相続関係図ツール ver11 プロトタイプ</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="startScreen" class="start-screen">
+    <section class="start-card">
+      <div class="start-title">相続関係図ツール ver11</div>
+      <div class="start-subtitle">人物カード作成・関係線作成プロトタイプ / 実業務利用不可</div>
+
+      <div class="start-section">
+        <h2>既存データから始める</h2>
+        <p class="muted">ver11で書き出したJSONファイルを選んで読み込みます。</p>
+        <button id="startLoadJsonButton" type="button">JSONを読み込む</button>
+      </div>
+
+      <div class="start-section">
+        <h2>新規作成する</h2>
+        <div id="startError" class="form-error" hidden></div>
+        <fieldset class="form-fieldset">
+          <legend>案件情報</legend>
+          <div class="form-row two-col">
+            <label>管理番号（月）<span class="required">必須</span><select id="caseMonthInput"></select></label>
+            <label>管理番号（連番）<span class="required">必須</span><input id="caseSerialInput" type="text" inputmode="numeric" placeholder="例: 50"></label>
+          </div>
+        </fieldset>
+        <fieldset class="form-fieldset">
+          <legend>被相続人情報</legend>
+          <div class="form-row two-col">
+            <label>姓<span class="required">姓または名が必須</span><input id="decedentFamilyNameInput" type="text" placeholder="例: 山田"></label>
+            <label>名<input id="decedentGivenNameInput" type="text" placeholder="例: 太郎"></label>
+          </div>
+          <div class="form-row">
+            <label>性別<select id="decedentGenderInput"><option value="unset">未設定</option><option value="male">男性</option><option value="female">女性</option></select></label>
+            <label>死亡年月日（和暦7桁）<input id="decedentDeathDateInput" type="text" inputmode="numeric" maxlength="12" placeholder="例: 5050401"></label>
+          </div>
+        </fieldset>
+        <button id="createCaseButton" class="primary large-button" type="button">作成して開始</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="appScreen" class="app-shell" hidden>
+    <header class="app-header">
+      <div class="title-area">
+        <div class="app-title">相続関係図ツール ver11</div>
+        <div id="caseSubtitle" class="app-subtitle">人物カード作成・関係線作成プロトタイプ</div>
+      </div>
+      <div class="header-controls">
+        <button id="exportJsonButton" type="button">JSONを書き出す</button>
+        <button id="loadJsonButton" type="button">JSONを読み込む</button>
+        <button id="undoButton" type="button" disabled>Undo</button>
+        <button id="printButton" type="button">印刷</button>
+        <button id="resetButton" type="button">初期画面に戻す</button>
+        <span class="separator"></span>
+        <button id="zoomOutButton" type="button">縮小</button>
+        <button id="zoomResetButton" type="button">100%</button>
+        <button id="zoomInButton" type="button">拡大</button>
+        <button id="centerDecedentButton" type="button">被相続人へ戻る</button>
+      </div>
+    </header>
+    <main class="app-main">
+      <section class="graph-pane" aria-label="関係図エリア">
+        <div class="graph-info" id="graphInfo"></div>
+        <div class="legend-panel" id="legendPanel" aria-label="凡例"><span><i class="legend-swatch decedent"></i>被相続人</span><span><i class="legend-swatch heir"></i>相続人</span><span><i class="legend-swatch checking"></i>調査中</span><span><i class="legend-swatch deceased"></i>死亡</span><span><i class="legend-swatch default"></i>その他</span></div>
+        <div class="svg-scroll" id="svgScroll"><svg id="diagramSvg" role="img" aria-label="相続関係図"></svg></div>
+      </section>
+      <aside class="detail-pane" aria-label="詳細欄">
+        <div class="detail-header">
+          <div class="detail-title">詳細欄</div>
+          <div class="detail-note">人物カードをクリックすると表示します</div>
+        </div>
+        <div id="detailContent" class="detail-content"></div>
+      </aside>
+    </main>
+  </div>
+
+  <input id="jsonFileInput" type="file" accept=".json,application/json" hidden>
+  <div id="loadingOverlay" class="loading-overlay" hidden>
+    <div class="loading-card">
+      <div class="loading-title">JSONを読み込んでいます</div>
+      <ol id="loadingSteps" class="loading-steps"></ol>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
+
+
+
+
+
