@@ -101,8 +101,14 @@ function computePrintLayout(data, settings) {
   enforceFirstChildMidpointAlignment(data, positions, linksByGroup);
   separateSiblingChildrenAfterAlignment(data, positions, linksByGroup);
   normalizeChildlessSpouseSlots(data, positions);
-  resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
-  resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
+  for (let i = 0; i < 4; i += 1) {
+    alignDirectFirstChildConnections(data, positions, linksByGroup);
+    resolveAllCardOverlaps(data, positions, linksByGroup, card);
+    resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
+    resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
+  }
+  alignDirectFirstChildConnections(data, positions, linksByGroup);
+  resolveAllCardOverlaps(data, positions, linksByGroup, card);
   const bounds = diagramBounds(positions, card);
   for (const pos of positions.values()) {
     pos.x += MARGIN - bounds.minX;
@@ -308,6 +314,114 @@ function spouseSlotDirection(data, relation, anchorId) {
   const relations = getSpouseRelations(data, anchorId).slice().sort(compareSpouseForLayout);
   const index = Math.max(0, relations.findIndex((item) => item.spouseRelationId === relation.spouseRelationId));
   return spouseSlotOffset(index) >= 0 ? 1 : -1;
+}
+
+function alignDirectFirstChildConnections(data, positions, linksByGroup) {
+  for (const cluster of buildParentClusters(data, linksByGroup)) {
+    const parents = cluster.parentIds.map((parentId) => ({ parentId, pos: positions.get(parentId) })).filter((item) => item.pos);
+    if (parents.length === 0) continue;
+    const visibleGroups = cluster.groups
+      .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+      .sort((a, b) => compareChildConnectionGroup(a, b));
+    if (visibleGroups.length === 0) continue;
+    const biologicalGroups = visibleGroups.filter((group) => group.groupKind !== "adoptive");
+    const directGroup = biologicalGroups[0] || (visibleGroups.length === 1 ? visibleGroups[0] : null);
+    if (!directGroup) continue;
+    const childPos = positions.get(directGroup.childId);
+    if (!childPos) continue;
+    if (parents.length === 1) {
+      parents[0].pos.y = childPos.y;
+      continue;
+    }
+    if (parents.length !== 2) continue;
+    const orderedParents = parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+    orderedParents[0].pos.y = childPos.y - GAP_Y / 2;
+    orderedParents[1].pos.y = childPos.y + GAP_Y / 2;
+  }
+}
+
+function resolveAllCardOverlaps(data, positions, linksByGroup, card) {
+  for (let pass = 0; pass < 8; pass += 1) {
+    let changed = false;
+    const entries = Array.from(positions.entries()).map(([personId, pos]) => ({ personId, pos }));
+    for (let i = 0; i < entries.length; i += 1) {
+      for (let j = i + 1; j < entries.length; j += 1) {
+        const a = entries[i];
+        const b = entries[j];
+        if (!cardRectsOverlap(a.pos, b.pos, card, 14, 14)) continue;
+        const upper = a.pos.y <= b.pos.y ? a : b;
+        const lower = a.pos.y <= b.pos.y ? b : a;
+        const shiftIds = overlapShiftIds(data, linksByGroup, upper.personId, lower.personId);
+        const bounds = subtreeBounds(positions, shiftIds, card);
+        if (!bounds) continue;
+        const minY = upper.pos.y + card.h / 2 + Math.max(18, card.h * 0.24);
+        const dy = minY - bounds.minY;
+        if (dy <= 0) continue;
+        shiftPositions(positions, shiftIds, dy);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+function overlapShiftIds(data, linksByGroup, upperId, lowerId) {
+  const relatedLowerChild = spouseChildForOverlappingParents(data, upperId, lowerId);
+  if (relatedLowerChild) return collectLineageBranchIds(data, relatedLowerChild, lowerId, linksByGroup);
+  return collectVisibleSubtreeIds(data, lowerId, linksByGroup);
+}
+
+function collectLineageBranchIds(data, childId, parentId, linksByGroup, ids = new Set()) {
+  if (ids.has(childId)) return ids;
+  ids.add(childId);
+  const parentGroups = data.parentGroups.filter((group) => group.childId === childId && group.diagramVisibility !== "hidden");
+  for (const group of parentGroups) {
+    const links = linksByGroup.get(group.parentGroupId) || [];
+    if (!links.some((link) => link.parentId === parentId)) continue;
+    for (const link of links) collectAncestorBranchIds(data, link.parentId, linksByGroup, ids);
+  }
+  for (const group of data.parentGroups) {
+    if (group.diagramVisibility === "hidden") continue;
+    const links = linksByGroup.get(group.parentGroupId) || [];
+    if (links.some((link) => link.parentId === childId)) collectLineageBranchIds(data, group.childId, childId, linksByGroup, ids);
+  }
+  return ids;
+}
+
+function collectAncestorBranchIds(data, personId, linksByGroup, ids) {
+  if (ids.has(personId)) return;
+  ids.add(personId);
+  for (const relation of getSpouseRelations(data, personId)) ids.add(otherSpouseId(relation, personId));
+  for (const group of data.parentGroups) {
+    if (group.childId !== personId || group.diagramVisibility === "hidden") continue;
+    const links = linksByGroup.get(group.parentGroupId) || [];
+    for (const link of links) collectAncestorBranchIds(data, link.parentId, linksByGroup, ids);
+  }
+}
+
+function spouseChildForOverlappingParents(data, upperParentId, lowerParentId) {
+  const upperChildren = childIdsForParent(data, upperParentId);
+  const lowerChildren = childIdsForParent(data, lowerParentId);
+  for (const upperChild of upperChildren) {
+    for (const lowerChild of lowerChildren) {
+      if (upperChild !== lowerChild && hasSpouseRelation(data, upperChild, lowerChild)) return lowerChild;
+    }
+  }
+  return null;
+}
+
+function hasSpouseRelation(data, personA, personB) { return data.spouseRelations.some((relation) => (relation.person1Id === personA && relation.person2Id === personB) || (relation.person1Id === personB && relation.person2Id === personA)); }
+function childIdsForParent(data, parentId) {
+  const ids = [];
+  for (const group of data.parentGroups) {
+    if (group.diagramVisibility === "hidden") continue;
+    if (data.parentLinks.some((link) => link.parentGroupId === group.parentGroupId && link.parentId === parentId)) ids.push(group.childId);
+  }
+  return ids;
+}
+
+function cardRectsOverlap(a, b, card, gapX, gapY) {
+  return Math.abs(a.x - b.x) < card.w + gapX && Math.abs(a.y - b.y) < card.h + gapY;
 }
 function resolveSpouseLineIntrusions(data, positions, linksByGroup, card) {
   for (let pass = 0; pass < 4; pass += 1) {
