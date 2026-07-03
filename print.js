@@ -1393,3 +1393,401 @@ function drawText(group, text, x, y, className, anchor) { const el = svgEl("text
 
 
 
+
+// Unit-based print layout override. Mirrors the input screen's spouseUnit / childUnit / siblingGroup model.
+function computePrintLayout(data, settings) {
+  const card = settings.printMode === "normal" ? CARD_NORMAL : CARD_SIMPLE;
+  const generations = computeGenerations(data);
+  const linksByGroup = groupBy(data.parentLinks, "parentGroupId");
+  return computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, { rowGap: Math.max(150, card.h * 2.25), unitGap: Math.max(22, card.w * 0.18), spouseGap: Math.max(52, card.w * 0.42), margin: MARGIN, minWidth: 600, minHeight: 420 });
+}
+
+function computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, options) {
+  const opts = { rowGap: 160, unitGap: 28, spouseGap: 64, margin: 28, minWidth: 600, minHeight: 420, ...options };
+  const peopleById = mapBy(data.people, "personId");
+  const model = buildLayoutUnitsPrintOverride(data, peopleById, linksByGroup, generations);
+  const positions = new Map();
+  for (const row of model.generationRows.values()) {
+    const y = row.index * opts.rowGap;
+    let x = 0;
+    const units = row.childUnits.slice().sort((a, b) => unitSortKeyPrintOverride(a, peopleById).localeCompare(unitSortKeyPrintOverride(b, peopleById), "ja"));
+    for (const unit of units) {
+      const width = unitWidthPrintOverride(unit, card, opts);
+      placeUnitMembersPrintOverride(unit, x + width / 2, y, positions, card, opts);
+      x += width + opts.unitGap;
+    }
+  }
+  for (let pass = 0; pass < 20; pass += 1) {
+    alignSpouseUnitsPrintOverride(model.spouseUnits, positions, card, opts);
+    alignSiblingGroupsPrintOverride(model.siblingGroups, model.childUnitsByPerson, positions, card, opts);
+    packGenerationRowsPrintOverride(model.generationRows, positions, card, opts);
+  }
+  const bounds = diagramBounds(positions, card);
+  for (const pos of positions.values()) {
+    pos.x += opts.margin - bounds.minX;
+    pos.y += opts.margin - bounds.minY;
+  }
+  const shiftedBounds = diagramBounds(positions, card);
+  const layout = { positions, generations, generationRows: model.generationRows, spouseUnits: model.spouseUnits, childUnits: model.childUnits, childUnitsByPerson: model.childUnitsByPerson, siblingGroups: model.siblingGroups, linksByGroup, card, width: Math.max(opts.minWidth, shiftedBounds.maxX + opts.margin), height: Math.max(opts.minHeight, shiftedBounds.maxY + opts.margin) };
+  layout.parentChildAnchors = buildParentChildAnchorsPrintOverride(layout);
+  return layout;
+}
+
+function buildLayoutUnitsPrintOverride(data, peopleById, linksByGroup, generations) {
+  for (const person of data.people) if (generations.get(person.personId) === undefined) generations.set(person.personId, 0);
+  const spouseUnits = data.spouseRelations.map((relation) => ({ spouseUnitId: relation.spouseRelationId, relation, memberIds: [relation.person1Id, relation.person2Id], generation: generations.get(relation.person1Id) ?? generations.get(relation.person2Id) ?? 0 }));
+  const spouseIdsByPerson = new Map();
+  for (const unit of spouseUnits) for (const personId of unit.memberIds) {
+    if (!spouseIdsByPerson.has(personId)) spouseIdsByPerson.set(personId, []);
+    spouseIdsByPerson.get(personId).push(unit);
+  }
+  const visited = new Set();
+  const childUnits = [];
+  const childUnitsByPerson = new Map();
+  for (const person of data.people) {
+    if (visited.has(person.personId)) continue;
+    const generation = generations.get(person.personId) ?? 0;
+    const queue = [person.personId];
+    const members = [];
+    visited.add(person.personId);
+    while (queue.length > 0) {
+      const currentId = queue.shift();
+      members.push(currentId);
+      for (const spouseUnit of spouseIdsByPerson.get(currentId) || []) {
+        for (const otherId of spouseUnit.memberIds) {
+          if (visited.has(otherId)) continue;
+          if ((generations.get(otherId) ?? generation) !== generation) continue;
+          visited.add(otherId);
+          queue.push(otherId);
+        }
+      }
+    }
+    members.sort((a, b) => String(a).localeCompare(String(b)));
+    const unit = { childUnitId: `cu:${members.join("+")}`, memberIds: members, primaryPersonId: person.personId, generation };
+    childUnits.push(unit);
+    for (const memberId of members) childUnitsByPerson.set(memberId, unit);
+  }
+  const generationRows = new Map();
+  for (const unit of childUnits) {
+    if (!generationRows.has(unit.generation)) generationRows.set(unit.generation, { generation: unit.generation, index: unit.generation, childUnits: [] });
+    generationRows.get(unit.generation).childUnits.push(unit);
+  }
+  const siblingGroups = buildParentClusters(data, linksByGroup).map((cluster) => {
+    const visibleGroups = cluster.groups.filter((group) => group.diagramVisibility !== "hidden");
+    const parentSpouseUnit = cluster.key.startsWith("s") ? spouseUnits.find((unit) => unit.spouseUnitId === cluster.key) || null : null;
+    return { siblingGroupId: `sg:${cluster.key}`, parentIds: cluster.parentIds, parentSpouseUnit, childGroups: visibleGroups, childUnitIds: visibleGroups.map((group) => childUnitsByPerson.get(group.childId)?.childUnitId).filter(Boolean) };
+  });
+  return { spouseUnits, childUnits, childUnitsByPerson, generationRows, siblingGroups };
+}
+
+function unitSortKeyPrintOverride(unit, peopleById) { return `${String(unit.generation).padStart(4, "0")}:${unit.memberIds.map((id) => displayName(peopleById.get(id)) || id).join("/")}:${unit.childUnitId}`; }
+function unitWidthPrintOverride(unit, card, opts) { return Math.max(card.w, unit.memberIds.length * card.w + Math.max(0, unit.memberIds.length - 1) * opts.spouseGap); }
+function placeUnitMembersPrintOverride(unit, centerX, y, positions, card, opts) {
+  const step = card.w + opts.spouseGap;
+  const startX = centerX - ((unit.memberIds.length - 1) * step) / 2;
+  unit.memberIds.forEach((personId, index) => positions.set(personId, { x: startX + index * step, y }));
+}
+function shiftUnitPrintOverride(unit, positions, dx) {
+  if (!unit || Math.abs(dx) < 0.5) return;
+  for (const personId of unit.memberIds) {
+    const pos = positions.get(personId);
+    if (pos) pos.x += dx;
+  }
+}
+function unitBoundsPrintOverride(unit, positions, card, pad = 0) {
+  const points = unit.memberIds.map((personId) => positions.get(personId)).filter(Boolean);
+  if (points.length === 0) return null;
+  return { left: Math.min(...points.map((pos) => pos.x - card.w / 2)) - pad, right: Math.max(...points.map((pos) => pos.x + card.w / 2)) + pad, top: Math.min(...points.map((pos) => pos.y - card.h / 2)) - pad, bottom: Math.max(...points.map((pos) => pos.y + card.h / 2)) + pad };
+}
+function unitCenterXPrintOverride(unit, positions) {
+  const xs = unit.memberIds.map((personId) => positions.get(personId)?.x).filter((value) => value !== undefined);
+  return xs.length ? average(xs) : 0;
+}
+function alignSpouseUnitsPrintOverride(spouseUnits, positions, card, opts) {
+  for (const unit of spouseUnits) {
+    const p1 = positions.get(unit.relation.person1Id), p2 = positions.get(unit.relation.person2Id);
+    if (!p1 || !p2) continue;
+    const y = Math.min(p1.y, p2.y);
+    p1.y = y; p2.y = y;
+    const minGap = card.w + opts.spouseGap;
+    if (Math.abs(p1.x - p2.x) < minGap) {
+      const center = average([p1.x, p2.x]);
+      const dir = p1.x <= p2.x ? 1 : -1;
+      p1.x = center - dir * minGap / 2;
+      p2.x = center + dir * minGap / 2;
+    }
+  }
+}
+function spouseMidpointPrintOverride(relation, positions, card) {
+  const p1 = positions.get(relation.person1Id), p2 = positions.get(relation.person2Id);
+  if (!p1 || !p2) return null;
+  const left = p1.x <= p2.x ? p1 : p2;
+  const right = p1.x <= p2.x ? p2 : p1;
+  return { x: (left.x + card.w / 2 + right.x - card.w / 2) / 2, y: left.y };
+}
+function parentAnchorForSiblingGroupPrintOverride(group, positions, card) {
+  if (group.parentSpouseUnit) return spouseMidpointPrintOverride(group.parentSpouseUnit.relation, positions, card);
+  const parents = group.parentIds.map((id) => positions.get(id)).filter(Boolean);
+  if (parents.length === 0) return null;
+  return { x: average(parents.map((pos) => pos.x)), y: Math.max(...parents.map((pos) => pos.y + card.h / 2)) };
+}
+function alignSiblingGroupsPrintOverride(siblingGroups, childUnitsByPerson, positions, card, opts) {
+  for (const group of siblingGroups) {
+    const anchor = parentAnchorForSiblingGroupPrintOverride(group, positions, card);
+    if (!anchor) continue;
+    const visible = group.childGroups.filter((childGroup) => childUnitsByPerson.has(childGroup.childId)).map((childGroup) => ({ childGroup, unit: childUnitsByPerson.get(childGroup.childId) }));
+    if (visible.length === 0) continue;
+    visible.sort((a, b) => (a.childGroup.displayOrder ?? 999) - (b.childGroup.displayOrder ?? 999) || String(a.childGroup.parentGroupId).localeCompare(String(b.childGroup.parentGroupId)));
+    shiftUnitPrintOverride(visible[0].unit, positions, anchor.x - unitCenterXPrintOverride(visible[0].unit, positions));
+    const unitGap = card.w + opts.spouseGap + opts.unitGap;
+    for (let i = 1; i < visible.length; i += 1) {
+      const side = i % 2 === 1 ? 1 : -1;
+      const distance = Math.ceil(i / 2) * unitGap;
+      shiftUnitPrintOverride(visible[i].unit, positions, anchor.x + side * distance - unitCenterXPrintOverride(visible[i].unit, positions));
+    }
+  }
+}
+function packGenerationRowsPrintOverride(generationRows, positions, card, opts) {
+  for (const row of generationRows.values()) {
+    const units = dedupeUnitsPrintOverride(row.childUnits).sort((a, b) => unitCenterXPrintOverride(a, positions) - unitCenterXPrintOverride(b, positions) || a.childUnitId.localeCompare(b.childUnitId));
+    let floor = -Infinity;
+    for (const unit of units) {
+      const bounds = unitBoundsPrintOverride(unit, positions, card, 0);
+      if (!bounds) continue;
+      const minLeft = floor + opts.unitGap;
+      if (bounds.left < minLeft) shiftUnitPrintOverride(unit, positions, minLeft - bounds.left);
+      floor = Math.max(floor, unitBoundsPrintOverride(unit, positions, card, 0).right);
+    }
+  }
+}
+function dedupeUnitsPrintOverride(units) {
+  const seen = new Set(), result = [];
+  for (const unit of units) if (!seen.has(unit.childUnitId)) { seen.add(unit.childUnitId); result.push(unit); }
+  return result;
+}
+function buildParentChildAnchorsPrintOverride(layout) {
+  const anchors = new Map();
+  for (const group of layout.siblingGroups) {
+    const anchor = parentAnchorForSiblingGroupPrintOverride(group, layout.positions, layout.card);
+    if (anchor) anchors.set(group.siblingGroupId, anchor);
+  }
+  return anchors;
+}
+function mapBy(items, key) { return new Map(items.map((item) => [item[key], item])); }
+function computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, options) {
+  const opts = { rowGap: 160, unitGap: 28, spouseGap: 64, margin: 28, minWidth: 600, minHeight: 420, ...options };
+  const peopleById = mapBy(data.people, "personId");
+  const model = buildLayoutUnitsPrintOverride(data, peopleById, linksByGroup, generations);
+  const positions = new Map();
+  for (const row of model.generationRows.values()) {
+    const y = row.index * opts.rowGap;
+    let x = 0;
+    const units = row.childUnits.slice().sort((a, b) => unitSortKeyPrintOverride(a, peopleById).localeCompare(unitSortKeyPrintOverride(b, peopleById), "ja"));
+    for (const unit of units) {
+      const width = unitWidthPrintOverride(unit, card, opts);
+      placeUnitMembersPrintOverride(unit, x + width / 2, y, positions, card, opts);
+      x += width + opts.unitGap;
+    }
+  }
+  for (let pass = 0; pass < 24; pass += 1) {
+    alignSpouseUnitsPrintOverride(model.spouseUnits, positions, card, opts);
+    alignSiblingGroupsPrintOverride(model.siblingGroups, model.childUnitsByPerson, positions, card, opts);
+    packGenerationRowsPrintOverride(model.generationRows, positions, card, opts);
+  }
+  alignSpouseUnitsPrintOverride(model.spouseUnits, positions, card, opts);
+  alignSiblingGroupsPrintOverride(model.siblingGroups, model.childUnitsByPerson, positions, card, opts);
+  const bounds = diagramBounds(positions, card);
+  for (const pos of positions.values()) { pos.x += opts.margin - bounds.minX; pos.y += opts.margin - bounds.minY; }
+  const shiftedBounds = diagramBounds(positions, card);
+  const layout = { positions, generations, generationRows: model.generationRows, spouseUnits: model.spouseUnits, childUnits: model.childUnits, childUnitsByPerson: model.childUnitsByPerson, siblingGroups: model.siblingGroups, linksByGroup, card, width: Math.max(opts.minWidth, shiftedBounds.maxX + opts.margin), height: Math.max(opts.minHeight, shiftedBounds.maxY + opts.margin) };
+  layout.parentChildAnchors = buildParentChildAnchorsPrintOverride(layout);
+  return layout;
+}
+function lockedFirstBioUnitIdsPrintOverride(model) {
+  const locked = new Set();
+  for (const group of model.siblingGroups) {
+    if (!group.parentSpouseUnit) continue;
+    const firstBio = group.childGroups.filter((item) => item.diagramVisibility !== "hidden" && item.groupKind === "biological").sort((a, b) => (a.displayOrder ?? 999) - (b.displayOrder ?? 999))[0];
+    const unitId = firstBio ? model.childUnitsByPerson.get(firstBio.childId)?.childUnitId : null;
+    if (unitId) locked.add(unitId);
+  }
+  return locked;
+}
+function resolveUnitOverlapsPreservingLocksPrintOverride(model, positions, card, opts) {
+  const locked = lockedFirstBioUnitIdsPrintOverride(model);
+  for (const row of model.generationRows.values()) {
+    const units = dedupeUnitsPrintOverride(row.childUnits).sort((a, b) => unitCenterXPrintOverride(a, positions) - unitCenterXPrintOverride(b, positions) || a.childUnitId.localeCompare(b.childUnitId));
+    for (let guard = 0; guard < units.length * 4; guard += 1) {
+      let changed = false;
+      for (let i = 0; i < units.length; i += 1) for (let j = i + 1; j < units.length; j += 1) {
+        const a = units[i], b = units[j];
+        const ba = unitBoundsPrintOverride(a, positions, card, 0), bb = unitBoundsPrintOverride(b, positions, card, 0);
+        if (!ba || !bb || ba.right + opts.unitGap <= bb.left || bb.right + opts.unitGap <= ba.left) continue;
+        const aLocked = locked.has(a.childUnitId), bLocked = locked.has(b.childUnitId);
+        if (aLocked && !bLocked) shiftUnitPrintOverride(b, positions, ba.right + opts.unitGap - bb.left);
+        else if (!aLocked && bLocked) shiftUnitPrintOverride(a, positions, bb.left - opts.unitGap - ba.right);
+        else shiftUnitPrintOverride(b, positions, ba.right + opts.unitGap - bb.left);
+        changed = true;
+      }
+      if (!changed) break;
+    }
+  }
+}
+function computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, options) {
+  const opts = { rowGap: 160, unitGap: 28, spouseGap: 64, margin: 28, minWidth: 600, minHeight: 420, ...options };
+  const peopleById = mapBy(data.people, "personId");
+  const model = buildLayoutUnitsPrintOverride(data, peopleById, linksByGroup, generations);
+  const positions = new Map();
+  for (const row of model.generationRows.values()) {
+    const y = row.index * opts.rowGap;
+    let x = 0;
+    const units = row.childUnits.slice().sort((a, b) => unitSortKeyPrintOverride(a, peopleById).localeCompare(unitSortKeyPrintOverride(b, peopleById), "ja"));
+    for (const unit of units) {
+      const width = unitWidthPrintOverride(unit, card, opts);
+      placeUnitMembersPrintOverride(unit, x + width / 2, y, positions, card, opts);
+      x += width + opts.unitGap;
+    }
+  }
+  for (let pass = 0; pass < 24; pass += 1) {
+    alignSpouseUnitsPrintOverride(model.spouseUnits, positions, card, opts);
+    alignSiblingGroupsPrintOverride(model.siblingGroups, model.childUnitsByPerson, positions, card, opts);
+    resolveUnitOverlapsPreservingLocksPrintOverride(model, positions, card, opts);
+  }
+  alignSpouseUnitsPrintOverride(model.spouseUnits, positions, card, opts);
+  alignSiblingGroupsPrintOverride(model.siblingGroups, model.childUnitsByPerson, positions, card, opts);
+  resolveUnitOverlapsPreservingLocksPrintOverride(model, positions, card, opts);
+  const bounds = diagramBounds(positions, card);
+  for (const pos of positions.values()) { pos.x += opts.margin - bounds.minX; pos.y += opts.margin - bounds.minY; }
+  const shiftedBounds = diagramBounds(positions, card);
+  const layout = { positions, generations, generationRows: model.generationRows, spouseUnits: model.spouseUnits, childUnits: model.childUnits, childUnitsByPerson: model.childUnitsByPerson, siblingGroups: model.siblingGroups, linksByGroup, card, width: Math.max(opts.minWidth, shiftedBounds.maxX + opts.margin), height: Math.max(opts.minHeight, shiftedBounds.maxY + opts.margin) };
+  layout.parentChildAnchors = buildParentChildAnchorsPrintOverride(layout);
+  return layout;
+}
+function resolveUnitOverlapsPreservingLocksPrintOverride(model, positions, card, opts) {
+  const locked = lockedFirstBioUnitIdsPrintOverride(model);
+  for (const row of model.generationRows.values()) {
+    const units = dedupeUnitsPrintOverride(row.childUnits);
+    const placed = [];
+    const lockedUnits = units.filter((unit) => locked.has(unit.childUnitId)).sort((a, b) => unitCenterXPrintOverride(a, positions) - unitCenterXPrintOverride(b, positions));
+    const freeUnits = units.filter((unit) => !locked.has(unit.childUnitId)).sort((a, b) => unitCenterXPrintOverride(a, positions) - unitCenterXPrintOverride(b, positions));
+    for (const unit of lockedUnits) placed.push({ unit, bounds: unitBoundsPrintOverride(unit, positions, card, opts.unitGap / 2) });
+    for (const unit of freeUnits) {
+      const current = unitCenterXPrintOverride(unit, positions);
+      const raw = unitBoundsPrintOverride(unit, positions, card, 0);
+      const width = raw.right - raw.left;
+      let bestX = current;
+      let bestScore = Infinity;
+      const step = Math.max(16, Math.round((card.w + opts.unitGap) / 2));
+      for (let k = 0; k <= units.length * 8; k += 1) {
+        for (const dir of k === 0 ? [0] : [-1, 1]) {
+          const candidate = current + dir * k * step;
+          const rect = { left: candidate - width / 2 - opts.unitGap / 2, right: candidate + width / 2 + opts.unitGap / 2 };
+          if (placed.some((item) => rect.left < item.bounds.right && rect.right > item.bounds.left)) continue;
+          const score = Math.abs(candidate - current);
+          if (score < bestScore) { bestScore = score; bestX = candidate; }
+        }
+        if (bestScore < Infinity) break;
+      }
+      shiftUnitPrintOverride(unit, positions, bestX - current);
+      placed.push({ unit, bounds: unitBoundsPrintOverride(unit, positions, card, opts.unitGap / 2) });
+      placed.sort((a, b) => a.bounds.left - b.bounds.left);
+    }
+  }
+}
+function alignSiblingGroupsPrintOverride(siblingGroups, childUnitsByPerson, positions, card, opts) {
+  for (const group of siblingGroups) {
+    const anchor = parentAnchorForSiblingGroupPrintOverride(group, positions, card);
+    if (!anchor) continue;
+    const visible = group.childGroups.filter((childGroup) => childUnitsByPerson.has(childGroup.childId)).map((childGroup) => ({ childGroup, unit: childUnitsByPerson.get(childGroup.childId) }));
+    if (visible.length === 0) continue;
+    visible.sort((a, b) => (a.childGroup.displayOrder ?? 999) - (b.childGroup.displayOrder ?? 999) || String(a.childGroup.parentGroupId).localeCompare(String(b.childGroup.parentGroupId)));
+    const childX = (item) => positions.get(item.childGroup.childId)?.x ?? unitCenterXPrintOverride(item.unit, positions);
+    shiftUnitPrintOverride(visible[0].unit, positions, anchor.x - childX(visible[0]));
+    const unitGap = card.w + opts.spouseGap + opts.unitGap;
+    for (let i = 1; i < visible.length; i += 1) {
+      const side = i % 2 === 1 ? 1 : -1;
+      const distance = Math.ceil(i / 2) * unitGap;
+      shiftUnitPrintOverride(visible[i].unit, positions, anchor.x + side * distance - childX(visible[i]));
+    }
+  }
+}
+function computePrintLayout(data, settings) {
+  const card = settings.printMode === "normal" ? CARD_NORMAL : CARD_SIMPLE;
+  const generations = computeGenerations(data);
+  const linksByGroup = groupBy(data.parentLinks, "parentGroupId");
+  return computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, { rowGap: Math.max(150, card.h * 2.25), unitGap: Math.max(28, card.w * 0.2), spouseGap: Math.max(150, card.w * 0.82), margin: MARGIN, minWidth: 600, minHeight: 420 });
+}
+function lockedFirstBioUnitIdsPrintOverride(model) {
+  const locked = new Set();
+  for (const group of model.siblingGroups) {
+    if (!group.parentSpouseUnit) continue;
+    const firstBio = group.childGroups.filter((item) => item.diagramVisibility !== "hidden" && item.groupKind === "biological").sort((a, b) => (a.displayOrder ?? 999) - (b.displayOrder ?? 999))[0];
+    const childUnitId = firstBio ? model.childUnitsByPerson.get(firstBio.childId)?.childUnitId : null;
+    if (childUnitId) locked.add(childUnitId);
+    for (const parentId of group.parentIds) {
+      const parentUnitId = model.childUnitsByPerson.get(parentId)?.childUnitId;
+      if (parentUnitId) locked.add(parentUnitId);
+    }
+  }
+  return locked;
+}
+
+function computePrintLayout(data, settings) {
+  const card = settings.printMode === "normal" ? CARD_NORMAL : CARD_SIMPLE;
+  const generations = computeGenerations(data);
+  const linksByGroup = groupBy(data.parentLinks, "parentGroupId");
+  return computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, { rowGap: Math.max(150, card.h * 2.25), unitGap: Math.max(32, card.w * 0.22), spouseGap: Math.max(250, card.w * 1.35), margin: MARGIN, minWidth: 600, minHeight: 420 });
+}
+function resolveHardRectOverlapsByBandPrintOverride(model, positions, card) {
+  const allUnits = model.childUnits.slice();
+  for (let guard = 0; guard < allUnits.length * 8; guard += 1) {
+    let changed = false;
+    for (let i = 0; i < allUnits.length; i += 1) for (let j = i + 1; j < allUnits.length; j += 1) {
+      const a = allUnits[i], b = allUnits[j];
+      const ba = unitBoundsPrintOverride(a, positions, card, 0), bb = unitBoundsPrintOverride(b, positions, card, 0);
+      if (!ba || !bb || ba.left >= bb.right || ba.right <= bb.left || ba.top >= bb.bottom || ba.bottom <= bb.top) continue;
+      const moving = b.generation >= a.generation ? b : a;
+      const fixed = moving === b ? ba : bb;
+      const movingBounds = moving === b ? bb : ba;
+      shiftUnitYPrintOverride(moving, positions, fixed.bottom + 18 - movingBounds.top);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+}
+function shiftUnitYPrintOverride(unit, positions, dy) {
+  if (!unit || Math.abs(dy) < 0.5) return;
+  for (const personId of unit.memberIds) {
+    const pos = positions.get(personId);
+    if (pos) pos.y += dy;
+  }
+}
+function computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, options) {
+  const opts = { rowGap: 160, unitGap: 32, spouseGap: 250, margin: 28, minWidth: 600, minHeight: 420, ...options };
+  const peopleById = mapBy(data.people, "personId");
+  const model = buildLayoutUnitsPrintOverride(data, peopleById, linksByGroup, generations);
+  const positions = new Map();
+  for (const row of model.generationRows.values()) {
+    const y = row.index * opts.rowGap;
+    let x = 0;
+    const units = row.childUnits.slice().sort((a, b) => unitSortKeyPrintOverride(a, peopleById).localeCompare(unitSortKeyPrintOverride(b, peopleById), "ja"));
+    for (const unit of units) { const width = unitWidthPrintOverride(unit, card, opts); placeUnitMembersPrintOverride(unit, x + width / 2, y, positions, card, opts); x += width + opts.unitGap; }
+  }
+  for (let pass = 0; pass < 24; pass += 1) { alignSpouseUnitsPrintOverride(model.spouseUnits, positions, card, opts); alignSiblingGroupsPrintOverride(model.siblingGroups, model.childUnitsByPerson, positions, card, opts); resolveUnitOverlapsPreservingLocksPrintOverride(model, positions, card, opts); }
+  alignSpouseUnitsPrintOverride(model.spouseUnits, positions, card, opts);
+  alignSiblingGroupsPrintOverride(model.siblingGroups, model.childUnitsByPerson, positions, card, opts);
+  resolveUnitOverlapsPreservingLocksPrintOverride(model, positions, card, opts);
+  resolveHardRectOverlapsByBandPrintOverride(model, positions, card);
+  const bounds = diagramBounds(positions, card);
+  for (const pos of positions.values()) { pos.x += opts.margin - bounds.minX; pos.y += opts.margin - bounds.minY; }
+  const shiftedBounds = diagramBounds(positions, card);
+  const layout = { positions, generations, generationRows: model.generationRows, spouseUnits: model.spouseUnits, childUnits: model.childUnits, childUnitsByPerson: model.childUnitsByPerson, siblingGroups: model.siblingGroups, linksByGroup, card, width: Math.max(opts.minWidth, shiftedBounds.maxX + opts.margin), height: Math.max(opts.minHeight, shiftedBounds.maxY + opts.margin) };
+  layout.parentChildAnchors = buildParentChildAnchorsPrintOverride(layout);
+  return layout;
+}
+function computePrintLayout(data, settings) {
+  const card = settings.printMode === "normal" ? CARD_NORMAL : CARD_SIMPLE;
+  const generations = computeGenerations(data);
+  const linksByGroup = groupBy(data.parentLinks, "parentGroupId");
+  return computeUnitPrintLayoutOverride(data, linksByGroup, generations, card, { rowGap: Math.max(260, card.h * 3.4), unitGap: Math.max(32, card.w * 0.22), spouseGap: Math.max(250, card.w * 1.35), margin: MARGIN, minWidth: 600, minHeight: 420 });
+}
