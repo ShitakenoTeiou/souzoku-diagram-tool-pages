@@ -237,6 +237,7 @@ function computeLayout(caseData) {
   compactParentChildDistances(caseData, positions, linksByGroup, peopleById);
   resolveAllCardOverlaps(caseData, positions, linksByGroup);
   clampSpouseRelationGaps(caseData, positions);
+  resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
   placeRemainingPeople(caseData, positions);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
@@ -462,6 +463,43 @@ function resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, people
           shiftPositions(positions, ids, dy);
           bounds.bottom += dy;
           changed = true;
+        }
+        floor = Math.max(floor, bounds.bottom);
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+function resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById) {
+  const decedentId = caseData.caseInfo?.decedentPersonId || caseData.people[0]?.personId || null;
+  const branchGap = Math.max(36, CARD.h * 0.45);
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+    for (const cluster of buildParentClusters(caseData, linksByGroup)) {
+      const parentIds = new Set(cluster.parentIds || []);
+      const branches = cluster.groups
+        .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+        .sort((a, b) => {
+          if (a.childId === decedentId && b.childId !== decedentId) return -1;
+          if (b.childId === decedentId && a.childId !== decedentId) return 1;
+          return compareChildGroups(a, b, peopleById);
+        });
+      let floor = -Infinity;
+      for (const group of branches) {
+        const ids = collectVisibleSubtreeIds(caseData, group.childId, linksByGroup);
+        for (const parentId of parentIds) ids.delete(parentId);
+        const bounds = subtreeBounds(positions, ids);
+        if (!bounds) continue;
+        if (floor !== -Infinity) {
+          const minTop = floor + branchGap;
+          if (bounds.top < minTop) {
+            const dy = minTop - bounds.top;
+            shiftPositions(positions, ids, dy);
+            bounds.top += dy;
+            bounds.bottom += dy;
+            changed = true;
+          }
         }
         floor = Math.max(floor, bounds.bottom);
       }
