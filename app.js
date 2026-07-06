@@ -371,7 +371,7 @@ function enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, p
       continue;
     }
     if (item.parents.length !== 2) continue;
-    const orderedParents = item.parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+    const orderedParents = orderParentPairForStableSpouseSlot(caseData, item.parents, positions);
     const parentGap = childrenWithParentPairs.has(orderedParents[0].parentId) && childrenWithParentPairs.has(orderedParents[1].parentId) ? SPOUSE_GAP * 2 : SPOUSE_GAP;
     orderedParents[0].pos.y = item.centerY - parentGap / 2;
     orderedParents[1].pos.y = item.centerY + parentGap / 2;
@@ -616,6 +616,21 @@ function spouseSlotDirection(caseData, relation, anchorId) {
   return spouseSlotOffset(spouseRelationSlotIndex(caseData, relation, anchorId)) >= 0 ? 1 : -1;
 }
 
+function orderParentPairForStableSpouseSlot(caseData, parents, positions) {
+  if (parents.length !== 2) return parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+  const relation = caseData.spouseRelations.find((item) => (item.person1Id === parents[0].parentId && item.person2Id === parents[1].parentId) || (item.person1Id === parents[1].parentId && item.person2Id === parents[0].parentId));
+  if (!relation) return parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+  const anchorId = spouseLayoutAnchorId(caseData, relation);
+  const otherId = otherSpouseId(relation, anchorId);
+  const anchorParent = parents.find((item) => item.parentId === anchorId);
+  const otherParent = parents.find((item) => item.parentId === otherId);
+  if (!anchorParent || !otherParent) return parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+  const generation = spouseRelationGeneration(caseData, relation, positions);
+  const slotIndex = spouseRelationSlotIndex(caseData, relation, anchorId);
+  const offset = spousePlacementOffset(slotIndex, generation);
+  return offset < 0 ? [otherParent, anchorParent] : [anchorParent, otherParent];
+}
+
 function resolveSpouseParentBranchOverlaps(caseData, positions, linksByGroup) {
   const decedentId = caseData.caseInfo.decedentPersonId;
   for (let pass = 0; pass < 4; pass += 1) {
@@ -708,7 +723,7 @@ function alignDirectFirstChildConnections(caseData, positions, linksByGroup, peo
     }
     if (parents.length !== 2) continue;
     const targetY = parentGroupCenterY(caseData, positions, peopleById, directGroup) ?? childPos.y;
-    const orderedParents = parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
+    const orderedParents = orderParentPairForStableSpouseSlot(caseData, parents, positions);
     const currentGap = orderedParents[1].pos.y - orderedParents[0].pos.y;
     if (currentGap > SPOUSE_GAP + 1) {
       movePersonWithChildlessSpouses(caseData, positions, directGroup.childId, (orderedParents[0].pos.y + orderedParents[1].pos.y) / 2 - childPos.y);
