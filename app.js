@@ -237,6 +237,7 @@ function computeLayout(caseData) {
   compactParentChildDistances(caseData, positions, linksByGroup, peopleById);
   resolveAllCardOverlaps(caseData, positions, linksByGroup);
   clampSpouseRelationGaps(caseData, positions);
+  preserveDecedentDirectFirstChildAlignment(caseData, positions, linksByGroup, peopleById);
   resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
   placeRemainingPeople(caseData, positions);
@@ -468,6 +469,27 @@ function resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, people
       }
     }
     if (!changed) break;
+  }
+}
+
+function preserveDecedentDirectFirstChildAlignment(caseData, positions, linksByGroup, peopleById) {
+  const decedentId = caseData.caseInfo?.decedentPersonId || caseData.people[0]?.personId || null;
+  if (!decedentId || !positions.has(decedentId)) return;
+  for (const cluster of buildParentClusters(caseData, linksByGroup)) {
+    if (!cluster.parentIds.includes(decedentId)) continue;
+    const parentPositions = cluster.parentIds.map((parentId) => positions.get(parentId)).filter(Boolean);
+    if (parentPositions.length === 0) continue;
+    const firstBiologicalGroup = cluster.groups
+      .filter((group) => group.diagramVisibility !== "hidden" && group.groupKind !== "adoptive" && positions.has(group.childId))
+      .sort((a, b) => compareChildGroups(a, b, peopleById))[0];
+    if (!firstBiologicalGroup) continue;
+    const childPos = positions.get(firstBiologicalGroup.childId);
+    const targetY = average(parentPositions.map((pos) => pos.y));
+    const dy = targetY - childPos.y;
+    if (Math.abs(dy) < 1) continue;
+    const ids = collectVisibleSubtreeIds(caseData, firstBiologicalGroup.childId, linksByGroup);
+    for (const parentId of cluster.parentIds) ids.delete(parentId);
+    shiftPositions(positions, ids, dy);
   }
 }
 
