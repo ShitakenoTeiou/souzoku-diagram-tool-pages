@@ -238,6 +238,7 @@ function computeLayout(caseData) {
   resolveAllCardOverlaps(caseData, positions, linksByGroup);
   clampSpouseRelationGaps(caseData, positions);
   preserveDecedentDirectFirstChildAlignment(caseData, positions, linksByGroup, peopleById);
+  preserveDecedentAsFirstChildFromParentsAlignment(caseData, positions, linksByGroup);
   resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
   placeRemainingPeople(caseData, positions);
@@ -323,18 +324,14 @@ function placeChildrenForKnownParents(caseData, positions, linksByGroup, peopleB
     const childGeneration = parentGenerations.length > 0 ? Math.max(...parentGenerations) + 1 : 1;
     const centerY = average(parentPositions.map((p) => p.y));
     const sortedGroups = cluster.groups.slice().sort((a, b) => compareChildGroups(a, b, peopleById));
-    const existingChildPositions = sortedGroups.map((group) => positions.get(group.childId)).filter(Boolean);
-    let nextPreferredY = existingChildPositions.length > 0 ? Math.max(...existingChildPositions.map((pos) => pos.y)) + CHILD_GAP : centerY;
     const usedRanges = usedYRangesForGeneration(positions, generations, childGeneration);
     const protectedRanges = spouseProtectedYRanges(caseData, positions, generations, childGeneration);
     sortedGroups.forEach((group, index) => {
       if (positions.has(group.childId)) return;
-      const span = estimateSubtreeSpan(caseData, group.childId, linksByGroup);
-      const preferredY = index === 0 && existingChildPositions.length === 0 ? centerY : nextPreferredY;
-      const y = chooseOpenChildY(preferredY, span, usedRanges, protectedRanges);
+      const preferredY = centerY + index * ROW_GAP;
+      const y = chooseOpenChildY(preferredY, ROW_GAP, usedRanges, protectedRanges);
       positions.set(group.childId, { x: generationX(childGeneration), y });
-      usedRanges.push(centeredRange(y, Math.max(ROW_GAP, span)));
-      nextPreferredY = Math.max(nextPreferredY, y) + Math.max(CHILD_GAP, span / 2 + ROW_GAP / 2 + 28);
+      usedRanges.push(centeredRange(y, ROW_GAP));
     });
   }
 }
@@ -493,9 +490,28 @@ function preserveDecedentDirectFirstChildAlignment(caseData, positions, linksByG
   }
 }
 
+function preserveDecedentAsFirstChildFromParentsAlignment(caseData, positions, linksByGroup) {
+  const decedentId = caseData.caseInfo?.decedentPersonId || caseData.people[0]?.personId || null;
+  const decedentPos = decedentId ? positions.get(decedentId) : null;
+  if (!decedentPos) return;
+  for (const cluster of buildParentClusters(caseData, linksByGroup)) {
+    if (!cluster.groups.some((group) => group.diagramVisibility !== "hidden" && group.childId === decedentId)) continue;
+    const parents = cluster.parentIds.map((parentId) => ({ parentId, pos: positions.get(parentId) })).filter((item) => item.pos);
+    if (parents.length === 0) continue;
+    if (parents.length === 1) {
+      parents[0].pos.y = decedentPos.y;
+      continue;
+    }
+    if (parents.length !== 2) continue;
+    const orderedParents = orderParentPairForStableSpouseSlot(caseData, parents, positions);
+    orderedParents[0].pos.y = decedentPos.y - SPOUSE_GAP / 2;
+    orderedParents[1].pos.y = decedentPos.y + SPOUSE_GAP / 2;
+  }
+}
+
 function resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById) {
   const decedentId = caseData.caseInfo?.decedentPersonId || caseData.people[0]?.personId || null;
-  const branchGap = Math.max(36, CARD.h * 0.45);
+  const minGap = Math.max(28, CARD.h * 0.35);
   for (let pass = 0; pass < 4; pass += 1) {
     let changed = false;
     for (const cluster of buildParentClusters(caseData, linksByGroup)) {
@@ -506,28 +522,46 @@ function resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peo
           if (a.childId === decedentId && b.childId !== decedentId) return -1;
           if (b.childId === decedentId && a.childId !== decedentId) return 1;
           return compareChildGroups(a, b, peopleById);
-        });
-      let floor = -Infinity;
-      for (const group of branches) {
-        const ids = collectVisibleSubtreeIds(caseData, group.childId, linksByGroup);
-        for (const parentId of parentIds) ids.delete(parentId);
-        const bounds = subtreeBounds(positions, ids);
-        if (!bounds) continue;
-        if (floor !== -Infinity) {
-          const minTop = floor + branchGap;
-          if (bounds.top < minTop) {
-            const dy = minTop - bounds.top;
-            shiftPositions(positions, ids, dy);
-            bounds.top += dy;
-            bounds.bottom += dy;
-            changed = true;
-          }
+        })
+        .map((group) => ({ group, ids: siblingBranchIds(caseData, group.childId, linksByGroup, parentIds) }))
+        .filter((branch) => branch.ids.size > 0);
+      const fixedBranches = [];
+      for (const branch of branches) {
+        const dy = siblingBranchRequiredShift(positions, fixedBranches, branch.ids, minGap);
+        if (dy > 0) {
+          shiftPositions(positions, branch.ids, dy);
+          changed = true;
         }
-        floor = Math.max(floor, bounds.bottom);
+        fixedBranches.push(branch.ids);
       }
     }
     if (!changed) break;
   }
+}
+
+function siblingBranchIds(caseData, childId, linksByGroup, parentIds) {
+  const ids = collectVisibleSubtreeIds(caseData, childId, linksByGroup);
+  for (const parentId of parentIds) ids.delete(parentId);
+  return ids;
+}
+
+function siblingBranchRequiredShift(positions, fixedBranches, movingIds, minGap) {
+  let required = 0;
+  for (const fixedIds of fixedBranches) {
+    for (const fixedId of fixedIds) {
+      const fixedPos = positions.get(fixedId);
+      if (!fixedPos) continue;
+      const fixedRect = cardRect(fixedPos, CARD, 18, minGap);
+      for (const movingId of movingIds) {
+        const movingPos = positions.get(movingId);
+        if (!movingPos) continue;
+        const movingRect = cardRect(movingPos, CARD, 18, minGap);
+        if (!rectsOverlap(fixedRect, movingRect)) continue;
+        required = Math.max(required, fixedRect.bottom - movingRect.top);
+      }
+    }
+  }
+  return Math.ceil(required);
 }
 
 function resolveSpouseLineIntrusions(caseData, positions, linksByGroup) {
