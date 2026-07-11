@@ -197,6 +197,7 @@ function computeLayout(caseData) {
     placeParentsForKnownChildren(caseData, positions, linksByGroup, generations);
     placeChildrenForKnownParents(caseData, positions, linksByGroup, peopleById, generations);
   }
+  arrangeMultipleParentGroupBands(caseData, positions, linksByGroup);
   resolveColumnOverlaps(caseData, positions, generations);
   resolveRootSubtreeOverlaps(caseData, positions, linksByGroup, generations);
   for (let i = 0; i < 3; i += 1) {
@@ -208,6 +209,7 @@ function computeLayout(caseData) {
   separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById);
   resolveSiblingSubtreeOverlaps(caseData, positions, linksByGroup, peopleById);
   resolveSpouseLineIntrusions(caseData, positions, linksByGroup);
+  arrangeMultipleParentGroupBands(caseData, positions, linksByGroup);
   resolveColumnOverlaps(caseData, positions, generations);
   enforceFirstChildMidpointAlignment(caseData, positions, linksByGroup, peopleById);
   separateSiblingChildrenAfterAlignment(caseData, positions, linksByGroup, peopleById);
@@ -241,17 +243,20 @@ function computeLayout(caseData) {
   preserveDecedentAsFirstChildFromParentsAlignment(caseData, positions, linksByGroup);
   resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
-  // Reassert relationship priorities after generic collision resolution: direct children stay at the couple midpoint,
-  // while competing sibling branches are the ones that move downward.
-  for (let i = 0; i < 2; i += 1) {
+  // Generic collision resolution runs first; semantic family constraints are reasserted afterward.
+  placeRemainingPeople(caseData, positions);
+  for (let i = 0; i < 4; i += 1) {
     clampSpouseRelationGaps(caseData, positions);
     alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
     preserveDecedentDirectFirstChildAlignment(caseData, positions, linksByGroup, peopleById);
     preserveDecedentAsFirstChildFromParentsAlignment(caseData, positions, linksByGroup);
+    arrangeMultipleParentGroupBands(caseData, positions, linksByGroup);
+    separateSpouseParentFamilies(caseData, positions, linksByGroup);
+    alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
+    normalizeSiblingBranchRows(caseData, positions, linksByGroup, peopleById);
     resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById);
   }
-  placeRemainingPeople(caseData, positions);
-  resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
+  enforceGenerationColumns(positions, generations);
   normalizePositions(positions);
   const bounds = getBounds(positions);
   return { positions, generations, card: CARD, width: Math.max(1200, bounds.maxX + MARGIN), height: Math.max(760, bounds.maxY + MARGIN) };
@@ -514,10 +519,27 @@ function preserveDecedentAsFirstChildFromParentsAlignment(caseData, positions, l
   }
 }
 
+function normalizeSiblingBranchRows(caseData, positions, linksByGroup, peopleById) {
+  for (const cluster of buildParentClusters(caseData, linksByGroup)) {
+    const groups = cluster.groups
+      .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+      .sort((a, b) => compareChildGroups(a, b, peopleById));
+    if (groups.length < 2) continue;
+    const baseY = positions.get(groups[0].childId).y;
+    const parentIds = new Set(cluster.parentIds || []);
+    groups.forEach((group, index) => {
+      const child = positions.get(group.childId);
+      const expectedY = baseY + index * ROW_GAP;
+      const dy = expectedY - child.y;
+      if (Math.abs(dy) < 1) return;
+      shiftPositions(positions, siblingBranchIds(caseData, group.childId, linksByGroup, parentIds), dy);
+    });
+  }
+}
 function resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById) {
   const decedentId = caseData.caseInfo?.decedentPersonId || caseData.people[0]?.personId || null;
   const minGap = Math.max(28, CARD.h * 0.35);
-  for (let pass = 0; pass < 4; pass += 1) {
+  for (let pass = 0; pass < 12; pass += 1) {
     let changed = false;
     for (const cluster of buildParentClusters(caseData, linksByGroup)) {
       const parentIds = new Set(cluster.parentIds || []);
@@ -706,6 +728,60 @@ function orderParentPairForStableSpouseSlot(caseData, parents, positions) {
   return offset < 0 ? [otherParent, anchorParent] : [anchorParent, otherParent];
 }
 
+function separateSpouseParentFamilies(caseData, positions, linksByGroup) {
+  const minGap = Math.max(28, CARD.h * 0.35);
+  for (const relation of caseData.spouseRelations.slice().sort(compareSpouseForLayout)) {
+    const anchorId = spouseLayoutAnchorId(caseData, relation);
+    const otherId = otherSpouseId(relation, anchorId);
+    const anchor = positions.get(anchorId);
+    const other = positions.get(otherId);
+    if (!anchor || !other || Math.abs(anchor.x - other.x) >= 10) continue;
+    const fixedIds = parentAncestorBranchIds(caseData, anchorId, linksByGroup);
+    const movingParentIds = parentAncestorBranchIds(caseData, otherId, linksByGroup);
+    const slotIndex = spouseRelationSlotIndex(caseData, relation, anchorId);
+    const generation = spouseRelationGeneration(caseData, relation, positions);
+    const offset = spousePlacementOffset(slotIndex, generation);
+    const direction = offset >= 0 ? 1 : -1;
+    const movingIds = new Set(movingParentIds);
+    movingIds.add(otherId);
+    const slotShortfall = Math.abs(offset) * SPOUSE_GAP - direction * (other.y - anchor.y);
+    if (slotShortfall > 0) shiftPositions(positions, movingIds, direction * slotShortfall);
+    if (fixedIds.size === 0 || movingParentIds.size === 0 || setsShareIds(fixedIds, movingParentIds)) continue;
+    const required = direction > 0
+      ? siblingBranchRequiredShift(positions, [fixedIds], movingParentIds, minGap)
+      : siblingBranchRequiredUpShift(positions, fixedIds, movingParentIds, minGap);
+    if (required > 0) shiftPositions(positions, movingIds, direction * required);
+  }
+}
+
+function parentAncestorBranchIds(caseData, childId, linksByGroup) {
+  const ids = new Set();
+  for (const group of caseData.parentGroups) {
+    if (group.childId !== childId || group.diagramVisibility === "hidden") continue;
+    for (const link of linksByGroup.get(group.parentGroupId) || []) {
+      collectAncestorBranchIds(caseData, link.parentId, linksByGroup, ids);
+    }
+  }
+  ids.delete(childId);
+  return ids;
+}
+
+function siblingBranchRequiredUpShift(positions, fixedIds, movingIds, minGap) {
+  let required = 0;
+  for (const fixedId of fixedIds) {
+    const fixedPos = positions.get(fixedId);
+    if (!fixedPos) continue;
+    const fixedRect = cardRect(fixedPos, CARD, 18, minGap);
+    for (const movingId of movingIds) {
+      const movingPos = positions.get(movingId);
+      if (!movingPos) continue;
+      const movingRect = cardRect(movingPos, CARD, 18, minGap);
+      if (!rectsOverlap(fixedRect, movingRect)) continue;
+      required = Math.max(required, movingRect.bottom - fixedRect.top);
+    }
+  }
+  return Math.ceil(required);
+}
 function resolveSpouseParentBranchOverlaps(caseData, positions, linksByGroup) {
   const decedentId = caseData.caseInfo.decedentPersonId;
   for (let pass = 0; pass < 4; pass += 1) {
@@ -787,7 +863,11 @@ function alignDirectFirstChildConnections(caseData, positions, linksByGroup, peo
       .sort((a, b) => compareChildGroups(a, b, peopleById));
     if (visibleGroups.length === 0) continue;
     const biologicalGroups = visibleGroups.filter((group) => group.groupKind !== "adoptive");
-    const directGroup = biologicalGroups[0] || (visibleGroups.length === 1 ? visibleGroups[0] : null);
+    const onlyGroup = visibleGroups.length === 1 ? visibleGroups[0] : null;
+    const hasBiologicalParentsElsewhere = onlyGroup && caseData.parentGroups.some((group) =>
+      group.childId === onlyGroup.childId && group.diagramVisibility !== "hidden" && group.groupKind !== "adoptive"
+    );
+    const directGroup = biologicalGroups[0] || (onlyGroup && !hasBiologicalParentsElsewhere ? onlyGroup : null);
     if (!directGroup) continue;
     const childPos = positions.get(directGroup.childId);
     if (!childPos) continue;
@@ -807,7 +887,16 @@ function alignDirectFirstChildConnections(caseData, positions, linksByGroup, peo
 function shiftChildBranchForDirectAlignment(caseData, positions, linksByGroup, group, parentIds, dy) {
   const ids = collectVisibleSubtreeIds(caseData, group.childId, linksByGroup);
   for (const parentId of parentIds) ids.delete(parentId);
+  // Keep a child-spouse unit together unless that spouse has its own parent anchor to preserve.
+  for (const relation of getSpouseRelations(caseData, group.childId)) {
+    const spouseId = otherSpouseId(relation, group.childId);
+    if (hasVisibleParentGroup(caseData, spouseId)) ids.delete(spouseId);
+  }
   shiftPositions(positions, ids, dy);
+}
+
+function hasVisibleParentGroup(caseData, personId) {
+  return caseData.parentGroups.some((group) => group.childId === personId && group.diagramVisibility !== "hidden");
 }
 
 function alignSingleAdoptiveChildrenNearParent(caseData, positions, linksByGroup, minDistance) {
@@ -1097,24 +1186,107 @@ function placeParentsForKnownChildren(caseData, positions, linksByGroup, generat
   }
 }
 
-function resolveColumnOverlaps(caseData, positions, generations) {
-  const byColumn = new Map();
-  for (const [personId, pos] of positions.entries()) {
-    const generation = generations.get(personId) ?? Math.round((pos.x - 700) / X_GAP);
-    if (!byColumn.has(generation)) byColumn.set(generation, []);
-    byColumn.get(generation).push({ personId, pos });
-  }
-  for (const [generation, items] of byColumn.entries()) {
-    const protectedRanges = spouseProtectedYRanges(caseData, positions, generations, generation);
-    items.sort((a, b) => a.pos.y - b.pos.y);
-    for (let i = 1; i < items.length; i += 1) {
-      const minY = items[i - 1].pos.y + ROW_GAP;
-      if (items[i].pos.y < minY) items[i].pos.y = minY;
-      items[i].pos.y = avoidProtectedCardY(items[i].pos.y, protectedRanges);
+function arrangeMultipleParentGroupBands(caseData, positions, linksByGroup) {
+  const groupsByChild = groupBy(
+    caseData.parentGroups.filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId)),
+    "childId"
+  );
+  for (const [childId, groups] of groupsByChild.entries()) {
+    if (groups.length < 2) continue;
+    const child = positions.get(childId);
+    const orderedGroups = groups.slice().sort(compareChildConnectionGroup);
+    let previousBottom = null;
+    const usedIds = new Set();
+    for (const group of orderedGroups) {
+      const parentIds = (linksByGroup.get(group.parentGroupId) || [])
+        .map((link) => link.parentId)
+        .filter((parentId) => positions.has(parentId));
+      if (parentIds.length === 0 || parentIds.some((parentId) => usedIds.has(parentId))) continue;
+      const halfSpan = parentUnitHalfSpan(parentIds.length);
+      const targetCenter = previousBottom === null
+        ? child.y
+        : previousBottom + Math.max(28, CARD.h * 0.35) + halfSpan;
+      const currentCenter = average(parentIds.map((parentId) => positions.get(parentId).y));
+      const branchIds = new Set();
+      for (const parentId of parentIds) collectAncestorBranchIds(caseData, parentId, linksByGroup, branchIds);
+      branchIds.delete(childId);
+      shiftPositions(positions, branchIds, targetCenter - currentCenter);
+      for (const parentId of parentIds) usedIds.add(parentId);
+      previousBottom = targetCenter + halfSpan;
     }
   }
 }
 
+function parentUnitHalfSpan(parentCount) {
+  return CARD.h / 2 + Math.max(0, parentCount - 1) * SPOUSE_GAP / 2;
+}
+function resolveColumnOverlaps(caseData, positions, generations) {
+  const byColumn = new Map();
+  for (const [personId, pos] of positions.entries()) {
+    const generation = generations.get(personId) ?? Math.round((pos.x - generationX(0)) / X_GAP);
+    if (!byColumn.has(generation)) byColumn.set(generation, []);
+    byColumn.get(generation).push({ personId, pos });
+  }
+  const decedentId = caseData.caseInfo?.decedentPersonId || null;
+  for (const items of byColumn.values()) {
+    const blocks = spouseConnectedColumnBlocks(caseData, items);
+    blocks.sort((a, b) => {
+      const priorityA = a.ids.has(decedentId) ? 0 : 1;
+      const priorityB = b.ids.has(decedentId) ? 0 : 1;
+      return priorityA - priorityB || a.top - b.top || a.center - b.center;
+    });
+    let floor = -Infinity;
+    for (const block of blocks) {
+      const minTop = floor + Math.max(28, CARD.h * 0.35);
+      if (block.top < minTop) {
+        const dy = minTop - block.top;
+        shiftPositions(positions, block.ids, dy);
+        block.top += dy;
+        block.bottom += dy;
+        block.center += dy;
+      }
+      floor = Math.max(floor, block.bottom);
+    }
+  }
+}
+
+function spouseConnectedColumnBlocks(caseData, items) {
+  const byId = new Map(items.map((item) => [item.personId, item]));
+  const adjacency = new Map(items.map((item) => [item.personId, new Set()]));
+  for (const relation of caseData.spouseRelations) {
+    const first = byId.get(relation.person1Id);
+    const second = byId.get(relation.person2Id);
+    if (!first || !second || Math.abs(first.pos.x - second.pos.x) >= 10) continue;
+    adjacency.get(relation.person1Id).add(relation.person2Id);
+    adjacency.get(relation.person2Id).add(relation.person1Id);
+  }
+  const visited = new Set();
+  const blocks = [];
+  for (const item of items) {
+    if (visited.has(item.personId)) continue;
+    const ids = new Set();
+    const stack = [item.personId];
+    while (stack.length > 0) {
+      const personId = stack.pop();
+      if (visited.has(personId)) continue;
+      visited.add(personId);
+      ids.add(personId);
+      for (const otherId of adjacency.get(personId) || []) stack.push(otherId);
+    }
+    const ys = Array.from(ids).map((personId) => positionsForBlock(byId, personId).y);
+    blocks.push({
+      ids,
+      top: Math.min(...ys) - CARD.h / 2,
+      bottom: Math.max(...ys) + CARD.h / 2,
+      center: average(ys)
+    });
+  }
+  return blocks;
+}
+
+function positionsForBlock(byId, personId) {
+  return byId.get(personId).pos;
+}
 function avoidProtectedCardY(y, protectedRanges) {
   let nextY = y;
   for (const range of protectedRanges) {
@@ -1229,6 +1401,12 @@ function placeRemainingPeople(caseData, positions) {
   }
 }
 
+function enforceGenerationColumns(positions, generations) {
+  for (const [personId, pos] of positions.entries()) {
+    const generation = generations.get(personId);
+    if (generation !== undefined) pos.x = generationX(generation);
+  }
+}
 function normalizePositions(positions) {
   let minX = Infinity, minY = Infinity;
   for (const pos of positions.values()) { minX = Math.min(minX, pos.x - CARD.w / 2); minY = Math.min(minY, pos.y - CARD.h / 2); }

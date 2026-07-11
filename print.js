@@ -94,6 +94,7 @@ function computePrintLayout(data, settings) {
     resolveSpouseLineIntrusions(data, positions, linksByGroup, card);
   }
   placeRemainingPeople(data, positions, generations);
+  arrangeMultipleParentGroupBands(data, positions, linksByGroup, card);
   resolveColumnOverlaps(positions, generations, card, data);
   resolveRootSubtreeOverlaps(data, positions, linksByGroup, generations, card);
   resolveColumnOverlaps(positions, generations, card, data);
@@ -122,11 +123,18 @@ function computePrintLayout(data, settings) {
   alignDirectFirstChildConnections(data, positions, linksByGroup);
   compactParentChildDistances(data, positions, linksByGroup);
   resolveAllCardOverlaps(data, positions, linksByGroup, card);
-  clampSpouseRelationGaps(data, positions, card);
-  // Keep the direct child connection as the final relationship priority; sibling branches absorb any remaining displacement.
-  alignDirectFirstChildConnections(data, positions, linksByGroup);
-  resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
   resolveFinalCardRectOverlaps(data, positions, linksByGroup, card);
+  // Reapply semantic units after the generic resolver so print and input layouts obey the same family rules.
+  for (let i = 0; i < 4; i += 1) {
+    clampSpouseRelationGaps(data, positions, card);
+    alignDirectFirstChildConnections(data, positions, linksByGroup);
+    arrangeMultipleParentGroupBands(data, positions, linksByGroup, card);
+    separateSpouseParentFamilies(data, positions, linksByGroup, card);
+    alignDirectFirstChildConnections(data, positions, linksByGroup);
+    normalizeSiblingBranchRows(data, positions, linksByGroup);
+    resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
+  }
+  enforceGenerationColumns(positions, generations);
   const bounds = diagramBounds(positions, card);
   for (const pos of positions.values()) {
     pos.x += MARGIN - bounds.minX;
@@ -213,16 +221,15 @@ function placeChildrenForKnownParents(data, positions, linksByGroup, generations
 
 function placeParentsForKnownChildren(data, positions, linksByGroup, generations) {
   for (const group of data.parentGroups) {
+    if (group.diagramVisibility === "hidden") continue;
     const child = positions.get(group.childId);
     if (!child) continue;
     const links = linksByGroup.get(group.parentGroupId) || [];
     const x = generationX((generations.get(group.childId) ?? 1) - 1);
-    let used = 0;
-    for (const link of links) {
-      if (positions.has(link.parentId)) continue;
-      positions.set(link.parentId, { x, y: child.y + used * GAP_Y });
-      used += 1;
-    }
+    links.forEach((link, index) => {
+      if (positions.has(link.parentId)) return;
+      positions.set(link.parentId, { x, y: child.y + centeredOffset(index, links.length, GAP_Y) });
+    });
   }
 }
 
@@ -273,24 +280,55 @@ function collectSiblingBlockIds(data, childId, positions) {
   return ids;
 }
 
-function resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card) {
+function normalizeSiblingBranchRows(data, positions, linksByGroup) {
   for (const cluster of buildParentClusters(data, linksByGroup)) {
-    const children = cluster.groups
+    const groups = cluster.groups
       .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
-      .sort((a, b) => positions.get(a.childId).y - positions.get(b.childId).y || compareChildConnectionGroup(a, b));
-    let floor = -Infinity;
-    for (const group of children) {
-      const ids = collectSiblingBlockIds(data, group.childId, positions);
-      const bounds = subtreeBounds(positions, ids, card);
-      if (!bounds) continue;
-      const minY = floor + Math.max(18, card.h * 0.24);
-      if (bounds.minY < minY) {
-        const dy = minY - bounds.minY;
-        shiftPositions(positions, ids, dy);
-        bounds.maxY += dy;
+      .sort(compareChildConnectionGroup);
+    if (groups.length < 2) continue;
+    const baseY = positions.get(groups[0].childId).y;
+    const parentIds = new Set(cluster.parentIds || []);
+    groups.forEach((group, index) => {
+      const child = positions.get(group.childId);
+      const expectedY = baseY + index * GAP_Y;
+      const dy = expectedY - child.y;
+      if (Math.abs(dy) < 1) return;
+      const ids = collectVisibleSubtreeIds(data, group.childId, linksByGroup);
+      for (const parentId of parentIds) ids.delete(parentId);
+      shiftPositions(positions, ids, dy);
+    });
+  }
+}
+function resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card) {
+  const decedentId = data.caseInfo?.decedentPersonId || data.people[0]?.personId || null;
+  const minGap = Math.max(18, card.h * 0.24);
+  for (let pass = 0; pass < 12; pass += 1) {
+    let changed = false;
+    for (const cluster of buildParentClusters(data, linksByGroup)) {
+      const parentIds = new Set(cluster.parentIds || []);
+      const branches = cluster.groups
+        .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
+        .sort((a, b) => {
+          if (a.childId === decedentId && b.childId !== decedentId) return -1;
+          if (b.childId === decedentId && a.childId !== decedentId) return 1;
+          return compareChildConnectionGroup(a, b);
+        })
+        .map((group) => {
+          const ids = collectVisibleSubtreeIds(data, group.childId, linksByGroup);
+          for (const parentId of parentIds) ids.delete(parentId);
+          return ids;
+        });
+      const fixed = [];
+      for (const ids of branches) {
+        const dy = printBranchRequiredShift(positions, fixed, ids, card, minGap);
+        if (dy > 0) {
+          shiftPositions(positions, ids, dy);
+          changed = true;
+        }
+        fixed.push(ids);
       }
-      floor = Math.max(floor, bounds.maxY);
     }
+    if (!changed) break;
   }
 }
 
@@ -381,6 +419,60 @@ function spouseSlotDirection(data, relation, anchorId) {
   return spouseSlotOffset(spouseRelationSlotIndex(data, relation, anchorId)) >= 0 ? 1 : -1;
 }
 
+function separateSpouseParentFamilies(data, positions, linksByGroup, card) {
+  const minGap = Math.max(18, card.h * 0.24);
+  for (const relation of data.spouseRelations.slice().sort(compareSpouseForLayout)) {
+    const anchorId = spouseLayoutAnchorId(data, relation);
+    const otherId = otherSpouseId(relation, anchorId);
+    const anchor = positions.get(anchorId);
+    const other = positions.get(otherId);
+    if (!anchor || !other || Math.abs(anchor.x - other.x) >= 10) continue;
+    const fixedIds = parentAncestorBranchIds(data, anchorId, linksByGroup);
+    const movingParentIds = parentAncestorBranchIds(data, otherId, linksByGroup);
+    const slotIndex = spouseRelationSlotIndex(data, relation, anchorId);
+    const generation = spouseRelationGeneration(relation, positions);
+    const offset = spousePlacementOffset(slotIndex, generation);
+    const direction = offset >= 0 ? 1 : -1;
+    const movingIds = new Set(movingParentIds);
+    movingIds.add(otherId);
+    const slotShortfall = Math.abs(offset) * GAP_Y - direction * (other.y - anchor.y);
+    if (slotShortfall > 0) shiftPositions(positions, movingIds, direction * slotShortfall);
+    if (fixedIds.size === 0 || movingParentIds.size === 0 || setsShareIds(fixedIds, movingParentIds)) continue;
+    const required = direction > 0
+      ? printBranchRequiredShift(positions, [fixedIds], movingParentIds, card, minGap)
+      : printBranchRequiredUpShift(positions, fixedIds, movingParentIds, card, minGap);
+    if (required > 0) shiftPositions(positions, movingIds, direction * required);
+  }
+}
+
+function parentAncestorBranchIds(data, childId, linksByGroup) {
+  const ids = new Set();
+  for (const group of data.parentGroups) {
+    if (group.childId !== childId || group.diagramVisibility === "hidden") continue;
+    for (const link of linksByGroup.get(group.parentGroupId) || []) {
+      collectAncestorBranchIds(data, link.parentId, linksByGroup, ids);
+    }
+  }
+  ids.delete(childId);
+  return ids;
+}
+
+function printBranchRequiredUpShift(positions, fixedIds, movingIds, card, minGap) {
+  let required = 0;
+  for (const fixedId of fixedIds) {
+    const fixed = positions.get(fixedId);
+    if (!fixed) continue;
+    for (const movingId of movingIds) {
+      const moving = positions.get(movingId);
+      if (!moving) continue;
+      const horizontalOverlap = Math.abs(fixed.x - moving.x) < card.w + 12;
+      const verticalOverlap = Math.abs(fixed.y - moving.y) < card.h + minGap;
+      if (!horizontalOverlap || !verticalOverlap) continue;
+      required = Math.max(required, moving.y + card.h / 2 + minGap / 2 - (fixed.y - card.h / 2 - minGap / 2));
+    }
+  }
+  return Math.ceil(required);
+}
 function resolveSpouseParentBranchOverlaps(data, positions, linksByGroup, card) {
   const decedentId = data.caseInfo.decedentPersonId;
   for (let pass = 0; pass < 4; pass += 1) {
@@ -461,7 +553,11 @@ function alignDirectFirstChildConnections(data, positions, linksByGroup) {
       .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
       .sort((a, b) => compareChildConnectionGroup(a, b));
     const biologicalGroups = visibleGroups.filter((group) => group.groupKind !== "adoptive");
-    const directGroup = biologicalGroups[0] || (visibleGroups.length === 1 ? visibleGroups[0] : null);
+    const onlyGroup = visibleGroups.length === 1 ? visibleGroups[0] : null;
+    const hasBiologicalParentsElsewhere = onlyGroup && data.parentGroups.some((group) =>
+      group.childId === onlyGroup.childId && group.diagramVisibility !== "hidden" && group.groupKind !== "adoptive"
+    );
+    const directGroup = biologicalGroups[0] || (onlyGroup && !hasBiologicalParentsElsewhere ? onlyGroup : null);
     if (!directGroup) continue;
     const child = positions.get(directGroup.childId);
     if (!child || (parents.length === 1 && directGroup.groupKind === "adoptive")) continue;
@@ -470,6 +566,10 @@ function alignDirectFirstChildConnections(data, positions, linksByGroup) {
     if (Math.abs(dy) < 1) continue;
     const ids = collectVisibleSubtreeIds(data, directGroup.childId, linksByGroup);
     for (const parentId of cluster.parentIds) ids.delete(parentId);
+    for (const relation of getSpouseRelations(data, directGroup.childId)) {
+      const spouseId = otherSpouseId(relation, directGroup.childId);
+      if (data.parentGroups.some((group) => group.childId === spouseId && group.diagramVisibility !== "hidden")) ids.delete(spouseId);
+    }
     shiftPositions(positions, ids, dy);
   }
 }
@@ -695,6 +795,36 @@ function placeRemainingPeople(data, positions, generations) {
   }
 }
 
+function arrangeMultipleParentGroupBands(data, positions, linksByGroup, card) {
+  const groupsByChild = groupBy(
+    data.parentGroups.filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId)),
+    "childId"
+  );
+  for (const [childId, groups] of groupsByChild.entries()) {
+    if (groups.length < 2) continue;
+    const child = positions.get(childId);
+    const orderedGroups = groups.slice().sort(compareChildConnectionGroup);
+    let previousBottom = null;
+    const usedIds = new Set();
+    for (const group of orderedGroups) {
+      const parentIds = (linksByGroup.get(group.parentGroupId) || [])
+        .map((link) => link.parentId)
+        .filter((parentId) => positions.has(parentId));
+      if (parentIds.length === 0 || parentIds.some((parentId) => usedIds.has(parentId))) continue;
+      const halfSpan = card.h / 2 + Math.max(0, parentIds.length - 1) * GAP_Y / 2;
+      const targetCenter = previousBottom === null
+        ? child.y
+        : previousBottom + Math.max(18, card.h * 0.24) + halfSpan;
+      const currentCenter = average(parentIds.map((parentId) => positions.get(parentId).y));
+      const branchIds = new Set();
+      for (const parentId of parentIds) collectAncestorBranchIds(data, parentId, linksByGroup, branchIds);
+      branchIds.delete(childId);
+      shiftPositions(positions, branchIds, targetCenter - currentCenter);
+      for (const parentId of parentIds) usedIds.add(parentId);
+      previousBottom = targetCenter + halfSpan;
+    }
+  }
+}
 function resolveColumnOverlaps(positions, generations, card, data = null) {
   const byX = new Map();
   for (const [id, pos] of positions) {
@@ -707,7 +837,7 @@ function resolveColumnOverlaps(positions, generations, card, data = null) {
     blocks.sort((a, b) => a.center - b.center);
     let floor = -Infinity;
     for (const block of blocks) {
-      const minTop = floor + Math.max(14, card.h * 0.18);
+      const minTop = floor + Math.max(18, card.h * 0.24);
       if (block.top < minTop) {
         const dy = minTop - block.top;
         for (const item of block.items) item.pos.y += dy;
@@ -722,22 +852,30 @@ function resolveColumnOverlaps(positions, generations, card, data = null) {
 
 function spouseAwareColumnBlocks(items, data, card) {
   const byId = new Map(items.map((item) => [item.id, item]));
-  const used = new Set();
-  const blocks = [];
+  const adjacency = new Map(items.map((item) => [item.id, new Set()]));
   if (data) {
-    const relations = data.spouseRelations.slice().sort(compareSpouseForLayout);
-    for (const relation of relations) {
-      const a = byId.get(relation.person1Id);
-      const b = byId.get(relation.person2Id);
-      if (!a || !b || used.has(a.id) || used.has(b.id)) continue;
-      if (Math.abs(a.pos.x - b.pos.x) >= 10) continue;
-      const pair = [a, b].sort((x, y) => x.pos.y - y.pos.y);
-      pair.forEach((item) => used.add(item.id));
-      blocks.push(columnBlock(pair, card));
+    for (const relation of data.spouseRelations) {
+      const first = byId.get(relation.person1Id);
+      const second = byId.get(relation.person2Id);
+      if (!first || !second || Math.abs(first.pos.x - second.pos.x) >= 10) continue;
+      adjacency.get(relation.person1Id).add(relation.person2Id);
+      adjacency.get(relation.person2Id).add(relation.person1Id);
     }
   }
+  const used = new Set();
+  const blocks = [];
   for (const item of items) {
-    if (!used.has(item.id)) blocks.push(columnBlock([item], card));
+    if (used.has(item.id)) continue;
+    const component = [];
+    const stack = [item.id];
+    while (stack.length > 0) {
+      const personId = stack.pop();
+      if (used.has(personId)) continue;
+      used.add(personId);
+      component.push(byId.get(personId));
+      for (const otherId of adjacency.get(personId) || []) stack.push(otherId);
+    }
+    blocks.push(columnBlock(component, card));
   }
   return blocks;
 }
@@ -809,6 +947,12 @@ function subtreeBounds(positions, ids, card) {
 
 function shiftPositions(positions, ids, dy) { for (const id of ids) { const pos = positions.get(id); if (pos) pos.y += dy; } }
 
+function enforceGenerationColumns(positions, generations) {
+  for (const [personId, pos] of positions.entries()) {
+    const generation = generations.get(personId);
+    if (generation !== undefined) pos.x = generationX(generation);
+  }
+}
 function diagramBounds(positions, card) {
   if (positions.size === 0) return { minX: 0, minY: 0, maxX: 800, maxY: 600 };
   const list = [...positions.values()];
