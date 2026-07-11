@@ -241,6 +241,15 @@ function computeLayout(caseData) {
   preserveDecedentAsFirstChildFromParentsAlignment(caseData, positions, linksByGroup);
   resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
+  // Reassert relationship priorities after generic collision resolution: direct children stay at the couple midpoint,
+  // while competing sibling branches are the ones that move downward.
+  for (let i = 0; i < 2; i += 1) {
+    clampSpouseRelationGaps(caseData, positions);
+    alignDirectFirstChildConnections(caseData, positions, linksByGroup, peopleById);
+    preserveDecedentDirectFirstChildAlignment(caseData, positions, linksByGroup, peopleById);
+    preserveDecedentAsFirstChildFromParentsAlignment(caseData, positions, linksByGroup);
+    resolveSiblingBranchSubtreeBands(caseData, positions, linksByGroup, peopleById);
+  }
   placeRemainingPeople(caseData, positions);
   resolveFinalCardRectOverlaps(caseData, positions, linksByGroup);
   normalizePositions(positions);
@@ -324,14 +333,10 @@ function placeChildrenForKnownParents(caseData, positions, linksByGroup, peopleB
     const childGeneration = parentGenerations.length > 0 ? Math.max(...parentGenerations) + 1 : 1;
     const centerY = average(parentPositions.map((p) => p.y));
     const sortedGroups = cluster.groups.slice().sort((a, b) => compareChildGroups(a, b, peopleById));
-    const usedRanges = usedYRangesForGeneration(positions, generations, childGeneration);
-    const protectedRanges = spouseProtectedYRanges(caseData, positions, generations, childGeneration);
     sortedGroups.forEach((group, index) => {
       if (positions.has(group.childId)) return;
-      const preferredY = centerY + index * ROW_GAP;
-      const y = chooseOpenChildY(preferredY, ROW_GAP, usedRanges, protectedRanges);
-      positions.set(group.childId, { x: generationX(childGeneration), y });
-      usedRanges.push(centeredRange(y, ROW_GAP));
+      // The first biological child owns the couple midpoint. Later siblings grow downward at a stable cadence.
+      positions.set(group.childId, { x: generationX(childGeneration), y: centerY + index * ROW_GAP });
     });
   }
 }
@@ -615,14 +620,41 @@ function clampSpouseRelationGaps(caseData, positions) {
     const anchor = positions.get(anchorId);
     const other = positions.get(otherId);
     if (!anchor || !other || Math.abs(anchor.x - other.x) >= 10) continue;
-    if (Math.abs(anchor.y - other.y) <= SPOUSE_GAP * 2.2) continue;
     const generation = Math.round((anchor.x - generationX(0)) / X_GAP);
     const slotIndex = spouseRelationSlotIndex(caseData, relation, anchorId);
     const offset = spousePlacementOffset(slotIndex, generation);
+    const expectedGap = Math.abs(offset) * SPOUSE_GAP;
+    const currentGap = Math.abs(anchor.y - other.y);
+    // A normal one-spouse unit remains compact. Larger gaps are reserved for genuine multi-spouse child-group collisions.
+    if (Math.abs(currentGap - expectedGap) < 1 || mayKeepExpandedSpouseGap(caseData, positions, relation)) continue;
     other.y = chooseOpenSpouseY(positions, anchor, otherId, offset, SPOUSE_GAP, ROW_GAP);
   }
 }
 
+function mayKeepExpandedSpouseGap(caseData, positions, relation) {
+  const childIds = caseData.parentGroups
+    .filter((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden")
+    .map((group) => group.childId);
+  if (childIds.length === 0) return false;
+  for (const anchorId of [relation.person1Id, relation.person2Id]) {
+    if (getSpouseRelations(caseData, anchorId).length < 2) continue;
+    for (const otherRelation of getSpouseRelations(caseData, anchorId)) {
+      if (otherRelation.spouseRelationId === relation.spouseRelationId) continue;
+      const otherChildren = caseData.parentGroups
+        .filter((group) => group.spouseRelationId === otherRelation.spouseRelationId && group.diagramVisibility !== "hidden")
+        .map((group) => group.childId);
+      for (const childId of childIds) {
+        const child = positions.get(childId);
+        if (!child) continue;
+        for (const otherChildId of otherChildren) {
+          const otherChild = positions.get(otherChildId);
+          if (otherChild && Math.abs(child.y - otherChild.y) < CARD.h + Math.max(28, ROW_GAP * 0.35)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 function normalizeChildlessSpouseSlots(caseData, positions) {
   for (const relation of caseData.spouseRelations.slice().sort(compareSpouseForLayout)) {
     if (caseData.parentGroups.some((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden")) continue;
@@ -1095,6 +1127,7 @@ function avoidProtectedCardY(y, protectedRanges) {
   return nextY;
 }
 function resolveRootSubtreeOverlaps(caseData, positions, linksByGroup, generations) {
+  const minGap = Math.max(28, CARD.h * 0.35);
   for (let pass = 0; pass < 4; pass += 1) {
     let changed = false;
     const rootsByGeneration = new Map();
@@ -1105,25 +1138,27 @@ function resolveRootSubtreeOverlaps(caseData, positions, linksByGroup, generatio
       rootsByGeneration.get(generation).push(person.personId);
     }
     for (const roots of rootsByGeneration.values()) {
-      const subtrees = uniqueRootSubtrees(caseData, positions, linksByGroup, roots);
-      subtrees.sort((a, b) => a.bounds.top - b.bounds.top);
-      let previousBottom = -Infinity;
+      const subtrees = uniqueRootSubtrees(caseData, positions, linksByGroup, roots)
+        .sort((a, b) => a.bounds.top - b.bounds.top);
+      const fixedSubtrees = [];
       for (const subtree of subtrees) {
-        const { ids, bounds } = subtree;
-        const minTop = previousBottom + ROW_GAP;
-        if (bounds.top < minTop) {
-          const dy = minTop - bounds.top;
-          shiftPositions(positions, ids, dy);
-          bounds.bottom += dy;
+        const comparableFixed = fixedSubtrees.filter((ids) => !setsShareIds(ids, subtree.ids));
+        const dy = siblingBranchRequiredShift(positions, comparableFixed, subtree.ids, minGap);
+        if (dy > 0) {
+          shiftPositions(positions, subtree.ids, dy);
           changed = true;
         }
-        previousBottom = Math.max(previousBottom, bounds.bottom);
+        fixedSubtrees.push(subtree.ids);
       }
     }
     if (!changed) break;
   }
 }
 
+function setsShareIds(a, b) {
+  for (const id of a) if (b.has(id)) return true;
+  return false;
+}
 function uniqueRootSubtrees(caseData, positions, linksByGroup, roots) {
   const bySignature = new Map();
   for (const rootId of roots) {

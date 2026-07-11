@@ -112,17 +112,20 @@ function computePrintLayout(data, settings) {
   resolveAllCardOverlaps(data, positions, linksByGroup, card);
   alignDirectFirstChildConnections(data, positions, linksByGroup);
   separateSiblingChildrenAfterAlignment(data, positions, linksByGroup);
-  clampSpouseRelationGaps(data, positions);
+  clampSpouseRelationGaps(data, positions, card);
   alignSingleAdoptiveChildrenNearParent(data, positions, linksByGroup, Math.max(18, card.h * 0.9));
   compactParentChildDistances(data, positions, linksByGroup);
   resolveAllCardOverlaps(data, positions, linksByGroup, card);
   compactParentChildDistances(data, positions, linksByGroup);
   resolveAllCardOverlaps(data, positions, linksByGroup, card);
-  clampSpouseRelationGaps(data, positions);
+  clampSpouseRelationGaps(data, positions, card);
   alignDirectFirstChildConnections(data, positions, linksByGroup);
   compactParentChildDistances(data, positions, linksByGroup);
   resolveAllCardOverlaps(data, positions, linksByGroup, card);
-  clampSpouseRelationGaps(data, positions);
+  clampSpouseRelationGaps(data, positions, card);
+  // Keep the direct child connection as the final relationship priority; sibling branches absorb any remaining displacement.
+  alignDirectFirstChildConnections(data, positions, linksByGroup);
+  resolveSiblingSubtreeOverlaps(data, positions, linksByGroup, card);
   resolveFinalCardRectOverlaps(data, positions, linksByGroup, card);
   const bounds = diagramBounds(positions, card);
   for (const pos of positions.values()) {
@@ -181,7 +184,7 @@ function placeSpouses(data, positions, generations) {
 
 function spouseSlotOffset(index) {
   const distance = Math.floor(index / 2) + 1;
-  return index % 2 === 0 ? -distance : distance;
+  return index % 2 === 0 ? distance : -distance;
 }
 
 function spousePlacementOffset(index, generation) {
@@ -241,26 +244,8 @@ function firstVisibleGroupForCluster(cluster, positions) {
 }
 
 function enforceFirstChildMidpointAlignment(data, positions, linksByGroup) {
-  const clusters = buildParentClusters(data, linksByGroup)
-    .map((cluster) => {
-      const parents = cluster.parentIds.map((parentId) => ({ parentId, pos: positions.get(parentId) })).filter((item) => item.pos);
-      const firstGroup = firstVisibleGroupForCluster(cluster, positions);
-      const centerY = firstGroup ? parentGroupCenterY(data, positions, firstGroup) : null;
-      return { parents, firstGroup, centerY };
-    })
-    .filter((item) => item.parents.length > 0 && item.centerY !== null)
-    .sort((a, b) => positions.get(b.firstGroup.childId).x - positions.get(a.firstGroup.childId).x);
-  for (const item of clusters) {
-    if (item.parents.length === 1) {
-      if (item.firstGroup.groupKind === "adoptive") continue;
-      item.parents[0].pos.y = item.centerY;
-      continue;
-    }
-    if (item.parents.length !== 2) continue;
-    const orderedParents = item.parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
-    orderedParents[0].pos.y = item.centerY - GAP_Y / 2;
-    orderedParents[1].pos.y = item.centerY + GAP_Y / 2;
-  }
+  // The couple is the fixed unit; its first biological child branch moves to the couple midpoint.
+  alignDirectFirstChildConnections(data, positions, linksByGroup);
 }
 
 function separateSiblingChildrenAfterAlignment(data, positions, linksByGroup) {
@@ -320,21 +305,46 @@ function spouseLineProtectedIds(data, relation) {
   return protectedIds;
 }
 
-function clampSpouseRelationGaps(data, positions) {
+function clampSpouseRelationGaps(data, positions, card = CARD_NORMAL) {
   for (const relation of data.spouseRelations.slice().sort(compareSpouseForLayout)) {
     const anchorId = spouseLayoutAnchorId(data, relation);
     const otherId = otherSpouseId(relation, anchorId);
     const anchor = positions.get(anchorId);
     const other = positions.get(otherId);
     if (!anchor || !other || Math.abs(anchor.x - other.x) >= 10) continue;
-    if (Math.abs(anchor.y - other.y) <= GAP_Y * 2.2) continue;
     const generation = Math.round((anchor.x - generationX(0)) / GAP_X);
     const slotIndex = spouseRelationSlotIndex(data, relation, anchorId);
-    const direction = spousePlacementOffset(slotIndex, generation) >= 0 ? 1 : -1;
-    other.y = chooseOpenSpouseY(positions, anchor, otherId, direction, GAP_Y, GAP_Y);
+    const offset = spousePlacementOffset(slotIndex, generation);
+    const expectedGap = Math.abs(offset) * GAP_Y;
+    if (Math.abs(Math.abs(anchor.y - other.y) - expectedGap) < 1 || mayKeepExpandedPrintSpouseGap(data, positions, relation, card)) continue;
+    other.y = chooseOpenSpouseY(positions, anchor, otherId, offset, GAP_Y, GAP_Y);
   }
 }
 
+function mayKeepExpandedPrintSpouseGap(data, positions, relation, card) {
+  const childIds = data.parentGroups
+    .filter((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden")
+    .map((group) => group.childId);
+  if (childIds.length === 0) return false;
+  for (const anchorId of [relation.person1Id, relation.person2Id]) {
+    if (getSpouseRelations(data, anchorId).length < 2) continue;
+    for (const otherRelation of getSpouseRelations(data, anchorId)) {
+      if (otherRelation.spouseRelationId === relation.spouseRelationId) continue;
+      const otherChildren = data.parentGroups
+        .filter((group) => group.spouseRelationId === otherRelation.spouseRelationId && group.diagramVisibility !== "hidden")
+        .map((group) => group.childId);
+      for (const childId of childIds) {
+        const child = positions.get(childId);
+        if (!child) continue;
+        for (const otherChildId of otherChildren) {
+          const otherChild = positions.get(otherChildId);
+          if (otherChild && Math.abs(child.y - otherChild.y) < card.h + Math.max(18, GAP_Y * 0.3)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 function normalizeChildlessSpouseSlots(data, positions) {
   for (const relation of data.spouseRelations.slice().sort(compareSpouseForLayout)) {
     if (data.parentGroups.some((group) => group.spouseRelationId === relation.spouseRelationId && group.diagramVisibility !== "hidden")) continue;
@@ -345,27 +355,14 @@ function normalizeChildlessSpouseSlots(data, positions) {
     if (!anchor || !other || Math.abs(anchor.x - other.x) >= 10) continue;
     const generation = Math.round((anchor.x - generationX(0)) / GAP_X);
     const slotIndex = spouseRelationSlotIndex(data, relation, anchorId);
-    const direction = spousePlacementOffset(slotIndex, generation) >= 0 ? 1 : -1;
-    other.y = chooseOpenSpouseY(positions, anchor, otherId, direction, GAP_Y, GAP_Y);
+    const offset = spousePlacementOffset(slotIndex, generation);
+    other.y = chooseOpenSpouseY(positions, anchor, otherId, offset, GAP_Y, GAP_Y);
   }
 }
 
 
-function chooseOpenSpouseY(positions, anchor, movingId, preferredDirection, gap, minDistance) {
-  const directions = [preferredDirection, -preferredDirection, preferredDirection * 2, -preferredDirection * 2, preferredDirection * 3, -preferredDirection * 3];
-  for (const direction of directions) {
-    const y = anchor.y + direction * gap;
-    let blocked = false;
-    for (const [personId, pos] of positions.entries()) {
-      if (personId === movingId) continue;
-      if (Math.abs(pos.x - anchor.x) < 10 && Math.abs(pos.y - y) < minDistance * 0.9) {
-        blocked = true;
-        break;
-      }
-    }
-    if (!blocked) return y;
-  }
-  return anchor.y + preferredDirection * gap;
+function chooseOpenSpouseY(positions, anchor, movingId, preferredOffset, gap, minDistance) {
+  return anchor.y + preferredOffset * gap;
 }
 function spouseLayoutAnchorId(data, relation) {
   const decedentId = data.caseInfo.decedentPersonId;
@@ -463,27 +460,17 @@ function alignDirectFirstChildConnections(data, positions, linksByGroup) {
     const visibleGroups = cluster.groups
       .filter((group) => group.diagramVisibility !== "hidden" && positions.has(group.childId))
       .sort((a, b) => compareChildConnectionGroup(a, b));
-    if (visibleGroups.length === 0) continue;
     const biologicalGroups = visibleGroups.filter((group) => group.groupKind !== "adoptive");
     const directGroup = biologicalGroups[0] || (visibleGroups.length === 1 ? visibleGroups[0] : null);
     if (!directGroup) continue;
-    const childPos = positions.get(directGroup.childId);
-    if (!childPos) continue;
-    if (parents.length === 1) {
-      if (directGroup.groupKind === "adoptive") continue;
-      parents[0].pos.y = childPos.y;
-      continue;
-    }
-    if (parents.length !== 2) continue;
-    const targetY = parentGroupCenterY(data, positions, directGroup) ?? childPos.y;
-    const orderedParents = parents.slice().sort((a, b) => a.pos.y - b.pos.y || String(a.parentId).localeCompare(String(b.parentId)));
-    const currentGap = orderedParents[1].pos.y - orderedParents[0].pos.y;
-    if (currentGap > GAP_Y + 1) {
-      movePersonWithChildlessSpouses(data, positions, directGroup.childId, (orderedParents[0].pos.y + orderedParents[1].pos.y) / 2 - childPos.y);
-      continue;
-    }
-    orderedParents[0].pos.y = targetY - GAP_Y / 2;
-    orderedParents[1].pos.y = targetY + GAP_Y / 2;
+    const child = positions.get(directGroup.childId);
+    if (!child || (parents.length === 1 && directGroup.groupKind === "adoptive")) continue;
+    const targetY = average(parents.map((parent) => parent.pos.y));
+    const dy = targetY - child.y;
+    if (Math.abs(dy) < 1) continue;
+    const ids = collectVisibleSubtreeIds(data, directGroup.childId, linksByGroup);
+    for (const parentId of cluster.parentIds) ids.delete(parentId);
+    shiftPositions(positions, ids, dy);
   }
 }
 
@@ -766,18 +753,41 @@ function columnBlock(items, card) {
 }
 
 function resolveRootSubtreeOverlaps(data, positions, linksByGroup, generations, card) {
-  const roots = data.people.filter((person) => !data.parentGroups.some((group) => group.childId === person.personId)).sort((a, b) => (positions.get(a.personId)?.y || 0) - (positions.get(b.personId)?.y || 0));
-  let floor = -Infinity;
+  const roots = data.people
+    .filter((person) => !data.parentGroups.some((group) => group.childId === person.personId))
+    .sort((a, b) => (positions.get(a.personId)?.y || 0) - (positions.get(b.personId)?.y || 0));
+  const fixed = [];
   for (const root of roots) {
     const ids = collectVisibleSubtreeIds(data, root.personId, linksByGroup);
-    const bounds = subtreeBounds(positions, ids, card);
-    if (!bounds) continue;
-    if (bounds.minY < floor + 18) {
-      shiftPositions(positions, ids, floor + 18 - bounds.minY);
-      bounds.maxY += floor + 18 - bounds.minY;
-    }
-    floor = Math.max(floor, bounds.maxY);
+    if (fixed.some((other) => setsShareIds(other, ids))) continue;
+    const dy = printBranchRequiredShift(positions, fixed, ids, card, Math.max(18, card.h * 0.24));
+    if (dy > 0) shiftPositions(positions, ids, dy);
+    fixed.push(ids);
   }
+}
+
+function setsShareIds(a, b) {
+  for (const id of a) if (b.has(id)) return true;
+  return false;
+}
+
+function printBranchRequiredShift(positions, fixedBranches, movingIds, card, minGap) {
+  let required = 0;
+  for (const fixedIds of fixedBranches) {
+    for (const fixedId of fixedIds) {
+      const fixed = positions.get(fixedId);
+      if (!fixed) continue;
+      for (const movingId of movingIds) {
+        const moving = positions.get(movingId);
+        if (!moving) continue;
+        const horizontalOverlap = Math.abs(fixed.x - moving.x) < card.w + 18;
+        const verticalOverlap = Math.abs(fixed.y - moving.y) < card.h + minGap;
+        if (!horizontalOverlap || !verticalOverlap) continue;
+        required = Math.max(required, fixed.y + card.h / 2 + minGap / 2 - (moving.y - card.h / 2 - minGap / 2));
+      }
+    }
+  }
+  return Math.ceil(required);
 }
 
 function collectVisibleSubtreeIds(data, rootId, linksByGroup, ids = new Set()) {
